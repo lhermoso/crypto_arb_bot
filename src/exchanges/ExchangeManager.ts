@@ -156,6 +156,14 @@ export class ExchangeManager extends EventEmitter {
       return 100;
     }
     
+    // Bybit only accepts 1, 50, 200, or 1000 for spot markets
+    if (exchangeId.toLowerCase() === 'bybit') {
+      if (requestedLimit <= 1) return 1;
+      if (requestedLimit <= 50) return 50;
+      if (requestedLimit <= 200) return 200;
+      return 1000;
+    }
+    
     // For other exchanges, use the requested limit
     return requestedLimit;
   }

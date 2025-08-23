@@ -82,6 +82,24 @@ function loadExchangeConfigs(): ExchangeConfig[] {
       const secret = EnvLoader.getString(`${upperExchangeId}_SECRET`);
       const password = process.env[`${upperExchangeId}_PASSWORD`]; // Optional for most exchanges
       
+      const options: {
+        enabled?: boolean;
+        sandbox?: boolean;
+        rateLimit?: number;
+        timeout?: number;
+      } = { 
+        enabled: true,
+        sandbox: isTestMode || (exchangeId === 'bybit' && process.env.BYBIT_TESTNET === 'true'),
+      };
+
+      if (process.env[`${upperExchangeId}_RATE_LIMIT`]) {
+        options.rateLimit = EnvLoader.getNumber(`${upperExchangeId}_RATE_LIMIT`);
+      }
+
+      if (process.env[`${upperExchangeId}_TIMEOUT`]) {
+        options.timeout = EnvLoader.getNumber(`${upperExchangeId}_TIMEOUT`);
+      }
+
       const config = createExchangeConfig(
         exchangeId,
         { 
@@ -89,12 +107,7 @@ function loadExchangeConfigs(): ExchangeConfig[] {
           secret, 
           ...(password ? { password } : {})
         },
-        { 
-          enabled: true,
-          sandbox: isTestMode,
-          rateLimit: EnvLoader.getNumber(`${upperExchangeId}_RATE_LIMIT`, undefined),
-          timeout: EnvLoader.getNumber(`${upperExchangeId}_TIMEOUT`, undefined),
-        }
+        options
       );
 
       if (validateExchangeConfig(config)) {

@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": "./dist",
+    "paths": {
+      "@/*": ["*"],
+      "@config/*": ["config/*"],
+      "@exchanges/*": ["exchanges/*"],
+      "@strategies/*": ["strategies/*"],
+      "@utils/*": ["utils/*"],
+      "@types/*": ["types/*"]
+    }
+  }
+}

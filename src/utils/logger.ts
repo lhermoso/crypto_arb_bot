@@ -84,26 +84,41 @@ if (!existsSync('logs')) {
  */
 export class PerformanceLogger {
   private startTimes = new Map<string, number>();
+  private operationCounter = 0;
+
+  /**
+   * Generate a unique operation ID to handle concurrent operations
+   */
+  private generateOperationId(operation: string): string {
+    return `${operation}-${++this.operationCounter}-${Date.now()}`;
+  }
 
   /**
    * Start timing an operation
    */
-  start(operation: string): void {
-    this.startTimes.set(operation, Date.now());
+  start(operation: string): string {
+    const operationId = this.generateOperationId(operation);
+    this.startTimes.set(operationId, Date.now());
+    return operationId;
   }
 
   /**
    * End timing and log the duration
    */
-  end(operation: string, metadata?: Record<string, unknown>): number {
-    const startTime = this.startTimes.get(operation);
+  end(operationId: string, metadata?: Record<string, unknown>): number {
+    const startTime = this.startTimes.get(operationId);
     if (!startTime) {
+      // Extract the operation name from the ID for better error messages
+      const operation = operationId.split('-')[0];
       logger.warn(`Performance timer for '${operation}' was not started`);
       return 0;
     }
 
     const duration = Date.now() - startTime;
-    this.startTimes.delete(operation);
+    this.startTimes.delete(operationId);
+    
+    // Extract the operation name from the ID for logging
+    const operation = operationId.split('-').slice(0, -2).join('-');
 
     logger.debug(`Performance: ${operation} completed in ${duration}ms`, {
       operation,
@@ -118,13 +133,30 @@ export class PerformanceLogger {
    * Time an async operation
    */
   async time<T>(operation: string, fn: () => Promise<T>, metadata?: Record<string, unknown>): Promise<T> {
-    this.start(operation);
+    const startTime = Date.now();
     try {
       const result = await fn();
-      this.end(operation, { ...metadata, success: true });
+      const duration = Date.now() - startTime;
+      
+      logger.debug(`Performance: ${operation} completed in ${duration}ms`, {
+        operation,
+        duration,
+        ...metadata,
+        success: true
+      });
+      
       return result;
     } catch (error) {
-      this.end(operation, { ...metadata, success: false, error: (error as Error).message });
+      const duration = Date.now() - startTime;
+      
+      logger.debug(`Performance: ${operation} failed in ${duration}ms`, {
+        operation,
+        duration,
+        ...metadata,
+        success: false,
+        error: (error as Error).message
+      });
+      
       throw error;
     }
   }

@@ -5,7 +5,7 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/main.js",
+    "start": "TS_NODE_PROJECT=tsconfig.runtime.json node -r tsconfig-paths/register dist/main.js",
     "dev": "ts-node src/main.ts",
     "dev:watch": "nodemon --exec ts-node src/main.ts",
     "clean": "rm -rf dist",
@@ -28,6 +28,7 @@
     "nodemon": "^3.1.10",
     "ts-jest": "^29.4.1",
     "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.2"
   },
   "keywords": [

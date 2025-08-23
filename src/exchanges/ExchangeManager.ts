@@ -98,14 +98,15 @@ export class ExchangeManager extends EventEmitter {
         exchangeOptions.password = config.credentials.password;
       }
 
-      // Configure sandbox mode
-      if (config.credentials.sandbox) {
-        exchangeOptions.sandbox = true;
-      }
-
       const exchange = new ExchangeClass(exchangeOptions) as unknown as ExtendedExchange;
 
+      // Configure sandbox mode using CCXT's standard method
+      if (config.credentials.sandbox) {
+        exchange.setSandboxMode(true);
+      }
+
       // Load markets
+
       await exchange.loadMarkets();
 
       // Check capabilities
@@ -144,6 +145,22 @@ export class ExchangeManager extends EventEmitter {
   }
 
   /**
+   * Get exchange-compatible order book limit
+   */
+  private getExchangeCompatibleLimit(exchangeId: ExchangeId, requestedLimit: number): number | undefined {
+    // KuCoin only accepts undefined, 5, 20, 50, or 100
+    if (exchangeId.toLowerCase() === 'kucoin') {
+      if (requestedLimit <= 5) return 5;
+      if (requestedLimit <= 20) return 20;
+      if (requestedLimit <= 50) return 50;
+      return 100;
+    }
+    
+    // For other exchanges, use the requested limit
+    return requestedLimit;
+  }
+
+  /**
    * Subscribe to order book updates for a symbol on all exchanges
    */
   async subscribeToOrderBook(symbol: Symbol, limit = 10): Promise<void> {
@@ -154,8 +171,11 @@ export class ExchangeManager extends EventEmitter {
         const subscriptionKey = `${exchangeId}-${symbol}-orderBook`;
         
         try {
+          // Adjust limit for KuCoin compatibility
+          const adjustedLimit = this.getExchangeCompatibleLimit(exchangeId, limit);
+          
           // Start watching order book
-          this.startWatchingOrderBook(instance, symbol, limit);
+          this.startWatchingOrderBook(instance, symbol, adjustedLimit);
           
           this.subscriptions.set(subscriptionKey, {
             exchange: exchangeId,
@@ -179,7 +199,7 @@ export class ExchangeManager extends EventEmitter {
   private async startWatchingOrderBook(
     instance: ExchangeInstance, 
     symbol: Symbol, 
-    limit: number
+    limit: number | undefined
   ): Promise<void> {
     const watchOrderBook = async (): Promise<void> => {
       try {
@@ -229,11 +249,14 @@ export class ExchangeManager extends EventEmitter {
     }
 
     try {
+      // Adjust limit for exchange compatibility
+      const adjustedLimit = this.getExchangeCompatibleLimit(exchangeId, limit);
+      
       // Use WebSocket data if available, otherwise fetch
       if (instance.capabilities.watchOrderBook && instance.exchange.watchOrderBook) {
-        return await instance.exchange.watchOrderBook(symbol, limit);
+        return await instance.exchange.watchOrderBook(symbol, adjustedLimit);
       } else {
-        return await instance.exchange.fetchOrderBook(symbol, limit);
+        return await instance.exchange.fetchOrderBook(symbol, adjustedLimit);
       }
     } catch (error) {
       this.handleExchangeError(instance, error as Error, 'getOrderBook');

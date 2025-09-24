@@ -47,7 +47,7 @@ crypto-arb-bot/
 
 1. **Clone and install dependencies:**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/lhermoso/crypto_arb_bot.git
    cd crypto-arb-bot
    npm install
    ```

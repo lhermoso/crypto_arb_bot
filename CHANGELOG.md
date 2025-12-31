@@ -17,9 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add configurable shutdown behavior via `SHUTDOWN_BEHAVIOR` env var (cancel/wait/force)
 - Add `cancelOrder`, `fetchOpenOrders`, and `cancelAllOrders` methods to ExchangeManager
 - Add pending order tracking in SimpleArbitrage strategy
+- Custom WebSocket rate limiter with token bucket algorithm for CCXT Pro connections
+- Exponential backoff strategy when rate limit errors (429) are received from exchanges
+- Rate limiter stats logging (requests per window, rate limit errors, throttle status)
+- Per-exchange rate limit configuration support via environment variables
 
 ### Fixed
 
+- Fix CCXT Pro WebSocket bypassing rate limiting causing IP bans
 - Enforce maxConcurrentTrades configuration limit to prevent unlimited concurrent trade execution
 - Fix price validation tolerance being too loose causing systematic profit erosion by making tolerance configurable and adding profit-aware validation
 - Add order book depth limits for all supported exchanges (Binance, OKX, Kraken) in ExchangeManager

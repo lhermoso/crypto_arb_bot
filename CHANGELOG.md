@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix stale balance data between validation and order execution by re-verifying balance immediately before order submission
 - Add balance reservation system to lock/reserve funds during execution window and prevent concurrent use
 - Fix race condition in activeTrades Set allowing duplicate trade execution by making check-and-add atomic
+- Use exchange-provided timestamps for arbitrage opportunity age validation instead of local clock to prevent trading on stale data when clock skew exists
 - Fix race condition in concurrent order execution that could cause naked short positions by executing buy order before sell order
 - Add partial fill threshold validation (default 95%) to reject trades with insufficient fill and prevent position mismatch
 - Adjust sell order amount to match actual buy fill amount for partial fills above threshold
@@ -33,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add configurable price tolerance settings: `SIMPLE_ARBITRAGE_PRICE_TOLERANCE`, `SIMPLE_ARBITRAGE_MAX_PROFIT_EROSION`, `SIMPLE_ARBITRAGE_DYNAMIC_TOLERANCE`
 - Add profit-aware price validation that rejects trades when price variance would consume too much expected profit
 - Add price variance tracking and statistics for monitoring actual vs expected profit variance
+- Add clock skew monitoring between local and exchange time with warning logs when skew exceeds 3 seconds
 
 ### Changed
 

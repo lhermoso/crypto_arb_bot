@@ -284,15 +284,18 @@ export class ExchangeManager extends EventEmitter {
         }
 
         const orderBook = await instance.exchange.watchOrderBook(symbol, limit);
-        
+
+        // Preserve exchange-provided timestamp, fallback to local time only if unavailable
+        const exchangeTimestamp = orderBook.timestamp || Date.now();
+
         const update: OrderBookUpdate = {
           exchange: instance.id,
           symbol,
           orderBook,
-          timestamp: Date.now(),
+          timestamp: exchangeTimestamp,
         };
 
-        instance.lastUpdate = Date.now();
+        instance.lastUpdate = exchangeTimestamp;
         instance.status = 'connected';
         instance.errorCount = 0;
 
@@ -744,11 +747,14 @@ export class ExchangeManager extends EventEmitter {
           this.getTicker(exchangeId, symbol).catch(() => undefined), // Ticker is optional
         ]);
 
+        // Use exchange-provided timestamp from order book, fallback to local time
+        const exchangeTimestamp = orderBook.timestamp || Date.now();
+
         const marketDataItem: MarketData = {
           exchange: exchangeId,
           symbol,
           orderBook,
-          timestamp: Date.now(),
+          timestamp: exchangeTimestamp,
         };
 
         if (ticker) {

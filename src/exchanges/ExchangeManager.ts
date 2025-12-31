@@ -5,16 +5,17 @@
 import * as ccxt from 'ccxt';
 import { EventEmitter } from 'events';
 import type { OrderBook, Ticker, Balances } from 'ccxt';
-import type { 
-  ExchangeId, 
-  Symbol, 
+import type {
+  ExchangeId,
+  Symbol,
   ExchangeConfig,
   MarketData,
   TradeOrder,
-  TradeResult
+  TradeResult,
+  TradingFees
 } from '@/types';
-import type { 
-  ExchangeInstance, 
+import type {
+  ExchangeInstance,
   ExtendedExchange,
   ConnectionStatus,
   OrderBookUpdate,
@@ -22,6 +23,15 @@ import type {
   MarketSubscription,
 } from './types';
 import { logger } from '@utils/logger';
+import { DEFAULT_TRADING_FEES } from '@config/exchanges';
+
+/**
+ * Cached trading fees for an exchange
+ */
+interface CachedFees {
+  fees: Record<string, TradingFees>;
+  lastUpdated: number;
+}
 
 /**
  * ExchangeManager class handles multiple exchange connections and WebSocket streams
@@ -34,6 +44,12 @@ export class ExchangeManager extends EventEmitter {
   private readonly maxReconnectAttempts = 5;
   private readonly initialReconnectDelay = 5000; // 5 seconds
   private readonly maxReconnectDelay = 300000; // 5 minutes
+
+  // Fee caching
+  private tradingFees = new Map<ExchangeId, CachedFees>();
+  private feeRefreshInterval: NodeJS.Timeout | undefined;
+  private readonly feeRefreshIntervalMs = 24 * 60 * 60 * 1000; // 24 hours
+  private readonly feeCacheMaxAge = 24 * 60 * 60 * 1000; // 24 hours
 
   constructor(private configs: ExchangeConfig[]) {
     super();
@@ -57,6 +73,12 @@ export class ExchangeManager extends EventEmitter {
     }
 
     logger.info(`Exchange manager initialized with ${this.exchanges.size} exchanges`);
+
+    // Fetch trading fees for all exchanges on startup
+    await this.fetchAllTradingFees();
+
+    // Start periodic fee refresh
+    this.startFeeRefreshInterval();
   }
 
   /**
@@ -560,6 +582,12 @@ export class ExchangeManager extends EventEmitter {
   async shutdown(): Promise<void> {
     logger.info('Shutting down exchange manager...');
 
+    // Clear fee refresh interval
+    if (this.feeRefreshInterval) {
+      clearInterval(this.feeRefreshInterval);
+      this.feeRefreshInterval = undefined;
+    }
+
     // Clear all reconnection timeouts
     for (const timeout of this.reconnectTimeouts.values()) {
       clearTimeout(timeout);
@@ -582,8 +610,165 @@ export class ExchangeManager extends EventEmitter {
 
     this.exchanges.clear();
     this.subscriptions.clear();
+    this.tradingFees.clear();
     this.removeAllListeners();
 
     logger.info('Exchange manager shutdown complete');
+  }
+
+  /**
+   * Fetch trading fees for all exchanges
+   */
+  private async fetchAllTradingFees(): Promise<void> {
+    logger.info('Fetching trading fees from all exchanges...');
+
+    const fetchPromises = Array.from(this.exchanges.keys()).map(async (exchangeId) => {
+      try {
+        await this.fetchTradingFeesForExchange(exchangeId);
+      } catch {
+        // Error already logged in fetchTradingFeesForExchange
+      }
+    });
+
+    await Promise.all(fetchPromises);
+
+    logger.info('Trading fees fetch complete', {
+      exchangesWithFees: Array.from(this.tradingFees.keys()),
+    });
+  }
+
+  /**
+   * Fetch trading fees for a specific exchange
+   */
+  private async fetchTradingFeesForExchange(exchangeId: ExchangeId): Promise<void> {
+    const instance = this.exchanges.get(exchangeId);
+    if (!instance) {
+      return;
+    }
+
+    try {
+      // Check if the exchange supports fetchTradingFees
+      if (!instance.exchange.has['fetchTradingFees']) {
+        logger.warn(`Exchange ${exchangeId} does not support fetchTradingFees, using default fees`, {
+          defaultFees: DEFAULT_TRADING_FEES[exchangeId],
+        });
+        this.setDefaultFees(exchangeId);
+        return;
+      }
+
+      logger.debug(`Fetching trading fees from ${exchangeId}...`);
+      const feesResponse = await instance.exchange.fetchTradingFees();
+
+      // Parse and cache the fees
+      const parsedFees: Record<string, TradingFees> = {};
+
+      for (const [symbol, feeData] of Object.entries(feesResponse)) {
+        if (feeData && typeof feeData === 'object') {
+          const fee = feeData as { maker?: number; taker?: number; percentage?: boolean };
+          parsedFees[symbol] = {
+            maker: fee.maker ?? DEFAULT_TRADING_FEES[exchangeId].maker,
+            taker: fee.taker ?? DEFAULT_TRADING_FEES[exchangeId].taker,
+            percentage: fee.percentage ?? true,
+          };
+        }
+      }
+
+      // Store the fetched fees
+      this.tradingFees.set(exchangeId, {
+        fees: parsedFees,
+        lastUpdated: Date.now(),
+      });
+
+      // Log a sample of fees for verification
+      const sampleSymbols = Object.keys(parsedFees).slice(0, 3);
+      const sampleFees = sampleSymbols.reduce((acc, symbol) => {
+        acc[symbol] = parsedFees[symbol];
+        return acc;
+      }, {} as Record<string, TradingFees>);
+
+      logger.info(`Trading fees fetched for ${exchangeId}`, {
+        symbolCount: Object.keys(parsedFees).length,
+        sampleFees,
+      });
+
+    } catch (error) {
+      logger.warn(`Failed to fetch trading fees from ${exchangeId}, using conservative defaults`, {
+        error: (error as Error).message,
+        defaultFees: DEFAULT_TRADING_FEES[exchangeId],
+      });
+      this.setDefaultFees(exchangeId);
+    }
+  }
+
+  /**
+   * Set default fees for an exchange (used as fallback)
+   */
+  private setDefaultFees(exchangeId: ExchangeId): void {
+    const defaultFee = DEFAULT_TRADING_FEES[exchangeId];
+    this.tradingFees.set(exchangeId, {
+      fees: {
+        '*': defaultFee, // Wildcard for all symbols
+      },
+      lastUpdated: Date.now(),
+    });
+  }
+
+  /**
+   * Start periodic fee refresh interval
+   */
+  private startFeeRefreshInterval(): void {
+    this.feeRefreshInterval = setInterval(async () => {
+      logger.info('Refreshing trading fees (periodic update)...');
+      await this.fetchAllTradingFees();
+    }, this.feeRefreshIntervalMs);
+
+    logger.debug('Fee refresh interval started', {
+      intervalHours: this.feeRefreshIntervalMs / (60 * 60 * 1000),
+    });
+  }
+
+  /**
+   * Get trading fee for a specific exchange and symbol
+   * Returns the actual fee if available, or conservative default otherwise
+   */
+  getTradingFee(exchangeId: ExchangeId, symbol: string, isMaker = false): number {
+    const cachedFees = this.tradingFees.get(exchangeId);
+
+    // Check if cache is expired
+    if (!cachedFees || (Date.now() - cachedFees.lastUpdated > this.feeCacheMaxAge)) {
+      // Return conservative default if cache is missing or expired
+      const defaultFees = DEFAULT_TRADING_FEES[exchangeId];
+      return isMaker ? defaultFees.maker : defaultFees.taker;
+    }
+
+    // Look for symbol-specific fee
+    const symbolFee = cachedFees.fees[symbol];
+    if (symbolFee) {
+      return isMaker ? symbolFee.maker : symbolFee.taker;
+    }
+
+    // Look for wildcard fee (used when we couldn't fetch specific fees)
+    const wildcardFee = cachedFees.fees['*'];
+    if (wildcardFee) {
+      return isMaker ? wildcardFee.maker : wildcardFee.taker;
+    }
+
+    // Fallback to default
+    const defaultFees = DEFAULT_TRADING_FEES[exchangeId];
+    return isMaker ? defaultFees.maker : defaultFees.taker;
+  }
+
+  /**
+   * Get all cached fees for an exchange (for debugging/monitoring)
+   */
+  getCachedFees(exchangeId: ExchangeId): CachedFees | undefined {
+    return this.tradingFees.get(exchangeId);
+  }
+
+  /**
+   * Force refresh trading fees for an exchange
+   */
+  async refreshTradingFees(exchangeId: ExchangeId): Promise<void> {
+    await this.fetchTradingFeesForExchange(exchangeId);
   }
 }

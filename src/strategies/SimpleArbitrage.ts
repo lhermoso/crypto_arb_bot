@@ -20,7 +20,8 @@ import {
   findArbitrageOpportunities,
   validateOpportunity,
   calculateRequiredBalance,
-  isSlippageAcceptable
+  isSlippageAcceptable,
+  FeeGetter
 } from '@utils/calculations';
 import { logger, TradeLogger, performanceLogger } from '@utils/logger';
 import { sleep, withTimeout, retry } from '@utils/helpers';
@@ -69,6 +70,7 @@ export class SimpleArbitrage extends BaseStrategy {
     priceVarianceImpact: number;
     symbol: string;
   }> = [];
+  private feeGetter: FeeGetter;
 
   constructor(
     name: string,
@@ -90,6 +92,11 @@ export class SimpleArbitrage extends BaseStrategy {
       maxProfitErosionPercent: 20, // Max 20% of expected profit can be eroded
       dynamicToleranceEnabled: true, // Enable profit-aware dynamic tolerance
       ...this.config.params,
+    };
+
+    // Create fee getter that uses ExchangeManager's fetched fees
+    this.feeGetter = (exchangeId, symbol, isMaker) => {
+      return this.exchangeManager.getTradingFee(exchangeId, symbol, isMaker);
     };
 
     logger.info(`SimpleArbitrage strategy initialized`, {
@@ -211,11 +218,12 @@ export class SimpleArbitrage extends BaseStrategy {
         this.lastMarketData.set(`${data.exchange}-${symbol}`, data);
       });
 
-      // Find arbitrage opportunities
+      // Find arbitrage opportunities (using fetched fees from ExchangeManager)
       const opportunities = findArbitrageOpportunities(
         marketData,
         this.config.minProfitPercent,
-        this.config.maxTradeAmount
+        this.config.maxTradeAmount,
+        this.feeGetter
       );
 
       // Process each opportunity

@@ -4,7 +4,12 @@
 
 import type { OrderBook } from 'ccxt';
 import type { ArbitrageOpportunity, ExchangeId, Symbol } from '@/types';
-import { getTradingFee } from '@config/exchanges';
+import { getTradingFee as getDefaultTradingFee } from '@config/exchanges';
+
+/**
+ * Fee getter function type - allows injecting custom fee retrieval
+ */
+export type FeeGetter = (exchangeId: ExchangeId, symbol: string, isMaker: boolean) => number;
 
 /**
  * Calculate the spread between bid and ask prices
@@ -59,6 +64,10 @@ export function calculateProfitAmount(
 
 /**
  * Find arbitrage opportunities between order books
+ * @param marketData - Array of market data from different exchanges
+ * @param minProfitPercent - Minimum profit percentage to consider an opportunity
+ * @param maxAmount - Maximum trade amount
+ * @param feeGetter - Optional function to get trading fees (defaults to static config fees)
  */
 export function findArbitrageOpportunities(
   marketData: Array<{
@@ -67,13 +76,17 @@ export function findArbitrageOpportunities(
     orderBook: OrderBook;
   }>,
   minProfitPercent = 0.5,
-  maxAmount = 1000
+  maxAmount = 1000,
+  feeGetter?: FeeGetter
 ): ArbitrageOpportunity[] {
   const opportunities: ArbitrageOpportunity[] = [];
 
   if (marketData.length < 2) {
     return opportunities;
   }
+
+  // Use provided fee getter or fall back to default
+  const getFee = feeGetter ?? getDefaultTradingFee;
 
   // Compare each exchange pair
   for (let i = 0; i < marketData.length; i++) {
@@ -93,7 +106,8 @@ export function findArbitrageOpportunities(
         market1.orderBook,
         market2.orderBook,
         minProfitPercent,
-        maxAmount
+        maxAmount,
+        getFee
       );
 
       const opp2 = calculateArbitrageOpportunity(
@@ -103,7 +117,8 @@ export function findArbitrageOpportunities(
         market2.orderBook,
         market1.orderBook,
         minProfitPercent,
-        maxAmount
+        maxAmount,
+        getFee
       );
 
       if (opp1) opportunities.push(opp1);
@@ -125,9 +140,10 @@ function calculateArbitrageOpportunity(
   buyOrderBook: OrderBook,
   sellOrderBook: OrderBook,
   minProfitPercent: number,
-  maxAmount: number
+  maxAmount: number,
+  getFee: FeeGetter
 ): ArbitrageOpportunity | null {
-  
+
   // Get best prices
   const bestAsk = getBestAsk(buyOrderBook);
   const bestBid = getBestBid(sellOrderBook);
@@ -136,9 +152,9 @@ function calculateArbitrageOpportunity(
     return null;
   }
 
-  // Calculate fees
-  const buyFee = getTradingFee(buyExchange, symbol, false); // taker fee
-  const sellFee = getTradingFee(sellExchange, symbol, false); // taker fee
+  // Calculate fees using the provided fee getter (fetched from exchange or default)
+  const buyFee = getFee(buyExchange, symbol, false); // taker fee
+  const sellFee = getFee(sellExchange, symbol, false); // taker fee
 
   // Calculate maximum tradeable amount
   const maxTradeableAmount = Math.min(

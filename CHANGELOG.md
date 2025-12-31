@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatically cap depth requests to exchange maximum with warning log when exceeded
 - Validate trade amounts against minimum trade amount using `getMinTradeAmount()` during opportunity validation to prevent order rejections
 - Reconnection logic now uses exponential backoff (5s, 10s, 20s, 40s...) with a maximum cap of 5 minutes to prevent request storms during extended outages
+- Fetch trading fees from exchange API on startup instead of using hardcoded defaults
+- Add periodic fee refresh (every 24 hours) to catch tier changes from trading volume
+- Fall back to conservative default fees with warning if API fetch fails
 - Fix race condition in concurrent order execution that could cause naked short positions by executing buy order before sell order
 - Add partial fill threshold validation (default 95%) to reject trades with insufficient fill and prevent position mismatch
 - Adjust sell order amount to match actual buy fill amount for partial fills above threshold

@@ -35,6 +35,7 @@ interface SimpleArbitrageConfig extends StrategyConfig {
     balanceReservePercent: number;
     maxOpportunityAge: number;
     priceValidationWindow: number;
+    partialFillThreshold: number;
   };
 }
 
@@ -61,6 +62,7 @@ export class SimpleArbitrage extends BaseStrategy {
       balanceReservePercent: 10, // 10% reserve
       maxOpportunityAge: 5000, // 5 seconds
       priceValidationWindow: 2000, // 2 seconds
+      partialFillThreshold: 95, // 95% minimum fill required
       ...this.config.params,
     };
 
@@ -339,7 +341,7 @@ export class SimpleArbitrage extends BaseStrategy {
   private async executeTrade(opportunity: ArbitrageOpportunity): Promise<void> {
     const config = this.config as SimpleArbitrageConfig;
     const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}`;
-    
+
     // Mark trade as active
     this.activeTrades.add(tradeKey);
 
@@ -369,7 +371,7 @@ export class SimpleArbitrage extends BaseStrategy {
 
       this.emit('execution_started', execution);
 
-      // Create trade orders
+      // Create buy order
       const buyOrder: TradeOrder = {
         exchange: opportunity.buyExchange,
         symbol: opportunity.symbol,
@@ -378,29 +380,99 @@ export class SimpleArbitrage extends BaseStrategy {
         type: 'market',
       };
 
+      // Execute buy order first with timeout
+      const buyResult = await withTimeout(
+        retry(() => this.exchangeManager.executeTrade(buyOrder), 2),
+        config.params.orderTimeout,
+        'Buy order execution timeout'
+      );
+
+      execution.buyTrade = buyResult;
+
+      // Check if buy order succeeded
+      if (!buyResult.success) {
+        execution.success = false;
+        execution.errors.push(`Buy order failed: ${buyResult.error}`);
+
+        logger.error('Arbitrage trade failed - buy order unsuccessful', {
+          symbol: opportunity.symbol,
+          buySuccess: buyResult.success,
+          error: buyResult.error,
+        });
+
+        TradeLogger.logTradeExecution({
+          symbol: opportunity.symbol,
+          exchanges: [opportunity.buyExchange, opportunity.sellExchange],
+          success: false,
+          error: execution.errors.join('; '),
+        });
+
+        return;
+      }
+
+      // Check for partial fill on buy order
+      const fillPercent = (buyResult.amount / opportunity.amount) * 100;
+      const isPartialFill = fillPercent < 100;
+      const partialFillThreshold = config.params.partialFillThreshold;
+
+      if (isPartialFill) {
+        logger.warn('Buy order partially filled', {
+          symbol: opportunity.symbol,
+          requestedAmount: opportunity.amount,
+          filledAmount: buyResult.amount,
+          fillPercent: fillPercent.toFixed(2),
+          threshold: partialFillThreshold,
+        });
+      }
+
+      // Reject if fill is below threshold
+      if (fillPercent < partialFillThreshold) {
+        execution.success = false;
+        execution.errors.push(
+          `Partial fill rejected: ${fillPercent.toFixed(2)}% filled (threshold: ${partialFillThreshold}%). ` +
+          `Bought ${buyResult.amount} of ${opportunity.amount} requested. Manual intervention may be required.`
+        );
+
+        logger.error('Arbitrage trade aborted - partial fill below threshold', {
+          symbol: opportunity.symbol,
+          buyExchange: opportunity.buyExchange,
+          requestedAmount: opportunity.amount,
+          filledAmount: buyResult.amount,
+          fillPercent: fillPercent.toFixed(2),
+          threshold: partialFillThreshold,
+        });
+
+        TradeLogger.logTradeExecution({
+          symbol: opportunity.symbol,
+          exchanges: [opportunity.buyExchange, opportunity.sellExchange],
+          success: false,
+          error: `Partial fill rejected: ${fillPercent.toFixed(2)}% < ${partialFillThreshold}% threshold`,
+        });
+
+        return;
+      }
+
+      // Create sell order with actual filled amount from buy order
+      const sellAmount = buyResult.amount;
       const sellOrder: TradeOrder = {
         exchange: opportunity.sellExchange,
         symbol: opportunity.symbol,
         side: 'sell',
-        amount: opportunity.amount,
+        amount: sellAmount,
         type: 'market',
       };
 
-      // Execute trades concurrently with timeout
-      const [buyResult, sellResult] = await withTimeout(
-        Promise.all([
-          retry(() => this.exchangeManager.executeTrade(buyOrder), 2),
-          retry(() => this.exchangeManager.executeTrade(sellOrder), 2),
-        ]),
+      // Execute sell order with timeout
+      const sellResult = await withTimeout(
+        retry(() => this.exchangeManager.executeTrade(sellOrder), 2),
         config.params.orderTimeout,
-        'Trade execution timeout'
+        'Sell order execution timeout'
       );
 
-      execution.buyTrade = buyResult;
       execution.sellTrade = sellResult;
 
-      // Calculate actual profit
-      if (buyResult.success && sellResult.success) {
+      // Calculate actual profit using actual filled amounts
+      if (sellResult.success) {
         const totalCost = buyResult.cost + buyResult.fee;
         const totalRevenue = sellResult.cost - sellResult.fee;
         execution.actualProfit = totalRevenue - totalCost;
@@ -412,6 +484,11 @@ export class SimpleArbitrage extends BaseStrategy {
           actualProfit: execution.actualProfit,
           buyPrice: buyResult.price,
           sellPrice: sellResult.price,
+          requestedAmount: opportunity.amount,
+          actualBuyAmount: buyResult.amount,
+          actualSellAmount: sellResult.amount,
+          partialFill: isPartialFill,
+          fillPercent: fillPercent.toFixed(2),
         });
 
         TradeLogger.logTradeExecution({
@@ -423,19 +500,13 @@ export class SimpleArbitrage extends BaseStrategy {
 
       } else {
         execution.success = false;
-        
-        if (!buyResult.success) {
-          execution.errors.push(`Buy order failed: ${buyResult.error}`);
-        }
-        
-        if (!sellResult.success) {
-          execution.errors.push(`Sell order failed: ${sellResult.error}`);
-        }
+        execution.errors.push(`Sell order failed: ${sellResult.error}`);
 
-        logger.error('Arbitrage trade failed', {
+        logger.error('Arbitrage trade failed - sell order unsuccessful', {
           symbol: opportunity.symbol,
           buySuccess: buyResult.success,
           sellSuccess: sellResult.success,
+          buyAmount: buyResult.amount,
           errors: execution.errors,
         });
 
@@ -450,9 +521,9 @@ export class SimpleArbitrage extends BaseStrategy {
     } catch (error) {
       execution.success = false;
       execution.errors.push((error as Error).message);
-      
+
       logger.error('Arbitrage trade execution error:', error);
-      
+
       TradeLogger.logTradeExecution({
         symbol: opportunity.symbol,
         exchanges: [opportunity.buyExchange, opportunity.sellExchange],
@@ -464,7 +535,7 @@ export class SimpleArbitrage extends BaseStrategy {
       // Mark trade as completed
       this.activeTrades.delete(tradeKey);
       execution.executionTime = Date.now() - execution.executionTime;
-      
+
       // Record the execution
       this.recordExecution(execution);
     }

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix partial order fills being treated as full success, causing position mismatch when sell order used requested amount instead of actual filled amount
+- Add configurable `SIMPLE_ARBITRAGE_PARTIAL_FILL_THRESHOLD` (default 95%) to reject trades with insufficient fill
+- Execute buy and sell orders sequentially instead of concurrently to properly handle partial fills
+- Profit calculations now use actual filled amounts instead of requested amounts
+
 ### Changed
 
 - Remove unused `_isBuy` parameter from `calculateWeightedAveragePrice` function in `src/utils/calculations.ts`

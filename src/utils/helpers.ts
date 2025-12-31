@@ -149,6 +149,16 @@ export function generateId(): string {
 }
 
 /**
+ * Generate a client order ID for idempotent order submission
+ * Format: arb_{timestamp}_{random} - allows exchanges to dedupe orders
+ */
+export function generateClientOrderId(): string {
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).substr(2, 8);
+  return `arb_${timestamp}_${random}`;
+}
+
+/**
  * Calculate the difference between two timestamps in a human-readable format
  */
 export function getTimeDiff(timestamp1: number, timestamp2: number): string {

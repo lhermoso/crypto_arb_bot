@@ -24,6 +24,7 @@ import type {
 } from './types';
 import { logger } from '@utils/logger';
 import { DEFAULT_TRADING_FEES } from '@config/exchanges';
+import { generateClientOrderId } from '@utils/helpers';
 
 /**
  * Cached trading fees for an exchange
@@ -50,6 +51,10 @@ export class ExchangeManager extends EventEmitter {
   private feeRefreshInterval: NodeJS.Timeout | undefined;
   private readonly feeRefreshIntervalMs = 24 * 60 * 60 * 1000; // 24 hours
   private readonly feeCacheMaxAge = 24 * 60 * 60 * 1000; // 24 hours
+
+  // Track recent orders by clientOrderId to prevent duplicate submissions
+  private recentOrders = new Map<string, { orderId: string; timestamp: number; exchange: ExchangeId }>();
+  private readonly recentOrderTTL = 60000; // 60 seconds TTL for recent order tracking
 
   constructor(private configs: ExchangeConfig[]) {
     super();
@@ -359,7 +364,10 @@ export class ExchangeManager extends EventEmitter {
   }
 
   /**
-   * Execute a trade order on a specific exchange
+   * Execute a trade order on a specific exchange with idempotency support
+   *
+   * Uses clientOrderId to prevent duplicate order submissions. If an order
+   * with the same clientOrderId already exists, returns the existing order result.
    */
   async executeTrade(order: TradeOrder): Promise<TradeResult> {
     const instance = this.exchanges.get(order.exchange);
@@ -371,13 +379,46 @@ export class ExchangeManager extends EventEmitter {
       throw new Error(`Exchange ${order.exchange} does not support order creation`);
     }
 
+    // Generate or use provided clientOrderId for idempotency
+    const clientOrderId = (order.params?.clientOrderId as string) || generateClientOrderId();
+
+    // Clean up stale entries from recentOrders
+    this.cleanupRecentOrders();
+
+    // Check if this order was already submitted (prevents duplicate fills on retry)
+    const existingOrder = this.recentOrders.get(clientOrderId);
+    if (existingOrder) {
+      logger.warn(`Order with clientOrderId ${clientOrderId} already submitted, checking status`, {
+        existingOrderId: existingOrder.orderId,
+        exchange: existingOrder.exchange,
+      });
+
+      // Try to fetch the existing order status
+      try {
+        const orderStatus = await this.fetchOrder(order.exchange, existingOrder.orderId, order.symbol);
+        if (orderStatus) {
+          logger.info(`Found existing order ${existingOrder.orderId}, returning cached result`);
+          return orderStatus;
+        }
+      } catch (fetchError) {
+        logger.debug(`Failed to fetch existing order ${existingOrder.orderId}:`, fetchError);
+      }
+    }
+
     try {
       logger.info(`Executing ${order.side} order on ${order.exchange}`, {
         symbol: order.symbol,
         amount: order.amount,
         price: order.price,
         type: order.type,
+        clientOrderId,
       });
+
+      // Merge clientOrderId into params for exchanges that support it
+      const orderParams = {
+        ...order.params,
+        clientOrderId,
+      };
 
       const result = await instance.exchange.createOrder(
         order.symbol,
@@ -385,7 +426,7 @@ export class ExchangeManager extends EventEmitter {
         order.side,
         order.amount,
         order.price,
-        order.params
+        orderParams
       );
 
       const tradeResult: TradeResult = {
@@ -402,10 +443,51 @@ export class ExchangeManager extends EventEmitter {
         success: true,
       };
 
+      // Track successful order to prevent duplicate submissions on retry
+      this.recentOrders.set(clientOrderId, {
+        orderId: result.id,
+        timestamp: Date.now(),
+        exchange: order.exchange,
+      });
+
       logger.info(`Trade executed successfully on ${order.exchange}`, tradeResult);
       return tradeResult;
 
     } catch (error) {
+      // On timeout errors, the order might have been placed - check before returning failure
+      const errorMessage = (error as Error).message.toLowerCase();
+      const isTimeoutError = errorMessage.includes('timeout') ||
+                            errorMessage.includes('timedout') ||
+                            errorMessage.includes('etimedout');
+
+      if (isTimeoutError) {
+        logger.warn(`Timeout during order submission on ${order.exchange}, checking for existing order`, {
+          clientOrderId,
+          symbol: order.symbol,
+        });
+
+        // Wait briefly for exchange to process, then check for the order
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        const existingOrderResult = await this.findRecentOrderByParams(
+          order.exchange,
+          order.symbol,
+          order.side,
+          order.amount
+        );
+
+        if (existingOrderResult) {
+          logger.info(`Found order placed despite timeout on ${order.exchange}`, existingOrderResult);
+          // Track to prevent duplicates on further retries
+          this.recentOrders.set(clientOrderId, {
+            orderId: existingOrderResult.orderId,
+            timestamp: Date.now(),
+            exchange: order.exchange,
+          });
+          return existingOrderResult;
+        }
+      }
+
       const tradeResult: TradeResult = {
         orderId: '',
         exchange: order.exchange,
@@ -425,6 +507,110 @@ export class ExchangeManager extends EventEmitter {
       logger.error(`Trade execution failed on ${order.exchange}:`, error);
 
       return tradeResult;
+    }
+  }
+
+  /**
+   * Fetch a specific order by ID
+   */
+  private async fetchOrder(exchangeId: ExchangeId, orderId: string, symbol: Symbol): Promise<TradeResult | null> {
+    const instance = this.exchanges.get(exchangeId);
+    if (!instance) {
+      return null;
+    }
+
+    try {
+      const order = await instance.exchange.fetchOrder(orderId, symbol);
+      if (order) {
+        return {
+          orderId: order.id,
+          exchange: exchangeId,
+          symbol: symbol,
+          side: order.side as 'buy' | 'sell',
+          amount: order.amount || 0,
+          filled: order.filled || 0,
+          price: order.average || order.price || 0,
+          cost: order.cost || 0,
+          fee: order.fee?.cost || 0,
+          timestamp: order.timestamp || Date.now(),
+          success: order.status === 'closed' || order.status === 'open' || (order.filled !== undefined && order.filled > 0),
+        };
+      }
+    } catch (error) {
+      logger.debug(`Failed to fetch order ${orderId} on ${exchangeId}:`, error);
+    }
+    return null;
+  }
+
+  /**
+   * Find a recent order matching the given parameters
+   * Used to detect if an order was placed despite a timeout
+   */
+  private async findRecentOrderByParams(
+    exchangeId: ExchangeId,
+    symbol: Symbol,
+    side: 'buy' | 'sell',
+    amount: number
+  ): Promise<TradeResult | null> {
+    const instance = this.exchanges.get(exchangeId);
+    if (!instance) {
+      return null;
+    }
+
+    try {
+      // Fetch recent orders (last 10) and look for a match
+      const orders = await instance.exchange.fetchOrders(symbol, undefined, 10);
+      const recentThreshold = Date.now() - 30000; // Orders within last 30 seconds
+
+      for (const order of orders) {
+        const orderTimestamp = order.timestamp || 0;
+        if (orderTimestamp < recentThreshold) {
+          continue;
+        }
+
+        // Match by side and approximate amount (within 1% tolerance)
+        if (order.side === side) {
+          const amountDiff = Math.abs((order.amount || 0) - amount) / amount;
+          if (amountDiff < 0.01) {
+            logger.info(`Found matching recent order on ${exchangeId}`, {
+              orderId: order.id,
+              symbol,
+              side,
+              amount: order.amount,
+            });
+
+            return {
+              orderId: order.id,
+              exchange: exchangeId,
+              symbol: symbol,
+              side: side,
+              amount: order.amount || amount,
+              filled: order.filled || 0,
+              price: order.average || order.price || 0,
+              cost: order.cost || 0,
+              fee: order.fee?.cost || 0,
+              timestamp: order.timestamp || Date.now(),
+              success: order.status === 'closed' || order.status === 'open' || (order.filled !== undefined && order.filled > 0),
+            };
+          }
+        }
+      }
+    } catch (error) {
+      logger.debug(`Failed to fetch recent orders on ${exchangeId}:`, error);
+    }
+
+    return null;
+  }
+
+  /**
+   * Clean up stale entries from recentOrders map
+   */
+  private cleanupRecentOrders(): void {
+    const now = Date.now();
+    for (const [clientOrderId, orderInfo] of this.recentOrders) {
+      if (now - orderInfo.timestamp > this.recentOrderTTL) {
+        this.recentOrders.delete(clientOrderId);
+      }
     }
   }
 

@@ -35,6 +35,17 @@ interface CachedFees {
 }
 
 /**
+ * Represents a reserved balance amount for a pending trade
+ */
+interface BalanceReservation {
+  exchange: ExchangeId;
+  currency: string;
+  amount: number;
+  tradeKey: string;
+  timestamp: number;
+}
+
+/**
  * ExchangeManager class handles multiple exchange connections and WebSocket streams
  */
 export class ExchangeManager extends EventEmitter {
@@ -55,6 +66,10 @@ export class ExchangeManager extends EventEmitter {
   // Track recent orders by clientOrderId to prevent duplicate submissions
   private recentOrders = new Map<string, { orderId: string; timestamp: number; exchange: ExchangeId }>();
   private readonly recentOrderTTL = 60000; // 60 seconds TTL for recent order tracking
+
+  // Balance reservation system
+  private balanceReservations = new Map<string, BalanceReservation>();
+  private readonly reservationTimeout = 60000; // 60 seconds - auto-release stale reservations
 
   constructor(private configs: ExchangeConfig[]) {
     super();
@@ -360,6 +375,108 @@ export class ExchangeManager extends EventEmitter {
     } catch (error) {
       this.handleExchangeError(instance, error as Error, 'getBalance');
       throw error;
+    }
+  }
+
+  /**
+   * Get available balance for a currency, accounting for reservations
+   */
+  getAvailableBalance(
+    balances: Balances,
+    exchangeId: ExchangeId,
+    currency: string
+  ): number {
+    // Clean up stale reservations first
+    this.cleanupStaleReservations();
+
+    const currencyBalance = balances[currency] as { free?: number } | undefined;
+    const freeBalance = currencyBalance?.free || 0;
+
+    // Calculate total reserved amount for this exchange/currency
+    let reservedAmount = 0;
+    for (const reservation of this.balanceReservations.values()) {
+      if (reservation.exchange === exchangeId && reservation.currency === currency) {
+        reservedAmount += reservation.amount;
+      }
+    }
+
+    return Math.max(0, freeBalance - reservedAmount);
+  }
+
+  /**
+   * Reserve balance for a pending trade to prevent concurrent use
+   */
+  reserveBalance(
+    tradeKey: string,
+    exchangeId: ExchangeId,
+    currency: string,
+    amount: number
+  ): void {
+    const reservationKey = `${tradeKey}-${exchangeId}-${currency}`;
+
+    this.balanceReservations.set(reservationKey, {
+      exchange: exchangeId,
+      currency,
+      amount,
+      tradeKey,
+      timestamp: Date.now(),
+    });
+
+    logger.debug('Balance reserved', {
+      tradeKey,
+      exchange: exchangeId,
+      currency,
+      amount,
+      reservationKey,
+    });
+  }
+
+  /**
+   * Release reserved balance after trade completion or failure
+   */
+  releaseReservation(tradeKey: string): void {
+    const keysToRemove: string[] = [];
+
+    for (const [key, reservation] of this.balanceReservations) {
+      if (reservation.tradeKey === tradeKey) {
+        keysToRemove.push(key);
+      }
+    }
+
+    for (const key of keysToRemove) {
+      this.balanceReservations.delete(key);
+    }
+
+    if (keysToRemove.length > 0) {
+      logger.debug('Balance reservations released', {
+        tradeKey,
+        releasedCount: keysToRemove.length,
+      });
+    }
+  }
+
+  /**
+   * Clean up stale reservations that have exceeded the timeout
+   */
+  private cleanupStaleReservations(): void {
+    const now = Date.now();
+    const keysToRemove: string[] = [];
+
+    for (const [key, reservation] of this.balanceReservations) {
+      if (now - reservation.timestamp > this.reservationTimeout) {
+        keysToRemove.push(key);
+        logger.warn('Releasing stale balance reservation', {
+          tradeKey: reservation.tradeKey,
+          exchange: reservation.exchange,
+          currency: reservation.currency,
+          amount: reservation.amount,
+          ageMs: now - reservation.timestamp,
+        });
+      }
+    }
+
+    for (const key of keysToRemove) {
+      this.balanceReservations.delete(key);
     }
   }
 

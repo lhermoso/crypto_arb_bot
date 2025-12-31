@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevent duplicate order fills from retry logic by implementing idempotency keys (clientOrderId) for order submissions
 - Add timeout-aware order verification that checks for existing orders before marking submission as failed
 - Remove retry wrapper from trade execution to prevent cascading multiple fills when combined with CCXT internal retries
+- Fix stale balance data between validation and order execution by re-verifying balance immediately before order submission
+- Add balance reservation system to lock/reserve funds during execution window and prevent concurrent use
 - Fix race condition in concurrent order execution that could cause naked short positions by executing buy order before sell order
 - Add partial fill threshold validation (default 95%) to reject trades with insufficient fill and prevent position mismatch
 - Adjust sell order amount to match actual buy fill amount for partial fills above threshold

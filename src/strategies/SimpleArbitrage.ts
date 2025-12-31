@@ -497,17 +497,21 @@ export class SimpleArbitrage extends BaseStrategy {
   /**
    * Check if we have required balances for the trade
    */
-  private async checkRequiredBalances(opportunity: ArbitrageOpportunity): Promise<boolean> {
+  private async checkRequiredBalances(
+    opportunity: ArbitrageOpportunity,
+    tradeKey?: string
+  ): Promise<boolean> {
     const config = this.config as SimpleArbitrageConfig;
     const requiredBalances = calculateRequiredBalance(opportunity);
+    const [baseCurrency, quoteCurrency] = opportunity.symbol.split('/');
 
     try {
       // Check buy exchange balance (need quote currency)
       const buyBalance = await this.exchangeManager.getBalance(opportunity.buyExchange);
-      const quoteCurrency = opportunity.symbol.split('/')[1];
-      const quoteCurrencyBalance = buyBalance[quoteCurrency] as any;
-      const availableQuote = quoteCurrencyBalance?.free || 0;
-      
+      const availableQuote = tradeKey
+        ? this.exchangeManager.getAvailableBalance(buyBalance, opportunity.buyExchange, quoteCurrency)
+        : (buyBalance[quoteCurrency] as { free?: number })?.free || 0;
+
       const reserveAmount = requiredBalances.buyExchangeBalance * (config.params.balanceReservePercent / 100);
       if (availableQuote < requiredBalances.buyExchangeBalance + reserveAmount) {
         return false;
@@ -515,17 +519,83 @@ export class SimpleArbitrage extends BaseStrategy {
 
       // Check sell exchange balance (need base currency)
       const sellBalance = await this.exchangeManager.getBalance(opportunity.sellExchange);
-      const baseCurrency = opportunity.symbol.split('/')[0];
-      const baseCurrencyBalance = sellBalance[baseCurrency] as any;
-      const availableBase = baseCurrencyBalance?.free || 0;
+      const availableBase = tradeKey
+        ? this.exchangeManager.getAvailableBalance(sellBalance, opportunity.sellExchange, baseCurrency)
+        : (sellBalance[baseCurrency] as { free?: number })?.free || 0;
 
       return availableBase >= requiredBalances.sellExchangeBalance;
-
-
-
     } catch (error) {
       logger.debug('Error checking balances:', error);
       return false;
+    }
+  }
+
+  /**
+   * Re-verify balance immediately before order execution
+   * Returns the required balance info if sufficient, null otherwise
+   */
+  private async verifyBalanceBeforeExecution(
+    opportunity: ArbitrageOpportunity,
+    tradeKey: string
+  ): Promise<{ quoteCurrency: string; baseCurrency: string; requiredQuote: number; requiredBase: number } | null> {
+    const config = this.config as SimpleArbitrageConfig;
+    const requiredBalances = calculateRequiredBalance(opportunity);
+    const [baseCurrency, quoteCurrency] = opportunity.symbol.split('/');
+
+    try {
+      // Fetch fresh balances right before execution
+      const [buyBalance, sellBalance] = await Promise.all([
+        this.exchangeManager.getBalance(opportunity.buyExchange),
+        this.exchangeManager.getBalance(opportunity.sellExchange),
+      ]);
+
+      // Get available balances accounting for other reservations (but not our own)
+      const availableQuote = this.exchangeManager.getAvailableBalance(
+        buyBalance,
+        opportunity.buyExchange,
+        quoteCurrency
+      );
+      const availableBase = this.exchangeManager.getAvailableBalance(
+        sellBalance,
+        opportunity.sellExchange,
+        baseCurrency
+      );
+
+      const reserveAmount = requiredBalances.buyExchangeBalance * (config.params.balanceReservePercent / 100);
+      const requiredQuote = requiredBalances.buyExchangeBalance + reserveAmount;
+      const requiredBase = requiredBalances.sellExchangeBalance;
+
+      if (availableQuote < requiredQuote) {
+        logger.warn('Insufficient quote currency balance at execution time', {
+          tradeKey,
+          exchange: opportunity.buyExchange,
+          currency: quoteCurrency,
+          required: requiredQuote,
+          available: availableQuote,
+          gap: requiredQuote - availableQuote,
+        });
+        return null;
+      }
+
+      if (availableBase < requiredBase) {
+        logger.warn('Insufficient base currency balance at execution time', {
+          tradeKey,
+          exchange: opportunity.sellExchange,
+          currency: baseCurrency,
+          required: requiredBase,
+          available: availableBase,
+          gap: requiredBase - availableBase,
+        });
+        return null;
+      }
+
+      return { quoteCurrency, baseCurrency, requiredQuote, requiredBase };
+    } catch (error) {
+      logger.error('Failed to verify balance before execution', {
+        tradeKey,
+        error: (error as Error).message,
+      });
+      return null;
     }
   }
 
@@ -534,8 +604,8 @@ export class SimpleArbitrage extends BaseStrategy {
    */
   private async executeTrade(opportunity: ArbitrageOpportunity): Promise<void> {
     const config = this.config as SimpleArbitrageConfig;
-    const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}`;
-    
+    const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}-${Date.now()}`;
+
     // Mark trade as active
     this.activeTrades.add(tradeKey);
 
@@ -554,6 +624,44 @@ export class SimpleArbitrage extends BaseStrategy {
         amount: opportunity.amount,
         expectedProfit: opportunity.profitAmount,
       });
+
+      // Re-verify balance immediately before execution to handle stale data
+      const balanceInfo = await this.verifyBalanceBeforeExecution(opportunity, tradeKey);
+
+      if (!balanceInfo) {
+        execution.success = false;
+        execution.errors.push('Insufficient balance at execution time - balance changed between validation and execution');
+
+        logger.error('Trade aborted - balance verification failed at execution time', {
+          tradeKey,
+          symbol: opportunity.symbol,
+          buyExchange: opportunity.buyExchange,
+          sellExchange: opportunity.sellExchange,
+        });
+
+        TradeLogger.logTradeExecution({
+          symbol: opportunity.symbol,
+          exchanges: [opportunity.buyExchange, opportunity.sellExchange],
+          success: false,
+          error: 'Insufficient balance at execution time',
+        });
+
+        return;
+      }
+
+      // Reserve balance to prevent concurrent use by other trades
+      this.exchangeManager.reserveBalance(
+        tradeKey,
+        opportunity.buyExchange,
+        balanceInfo.quoteCurrency,
+        balanceInfo.requiredQuote
+      );
+      this.exchangeManager.reserveBalance(
+        tradeKey,
+        opportunity.sellExchange,
+        balanceInfo.baseCurrency,
+        balanceInfo.requiredBase
+      );
 
       TradeLogger.logOpportunity({
         symbol: opportunity.symbol,
@@ -732,9 +840,9 @@ export class SimpleArbitrage extends BaseStrategy {
     } catch (error) {
       execution.success = false;
       execution.errors.push((error as Error).message);
-      
+
       logger.error('Arbitrage trade execution error:', error);
-      
+
       TradeLogger.logTradeExecution({
         symbol: opportunity.symbol,
         exchanges: [opportunity.buyExchange, opportunity.sellExchange],
@@ -743,10 +851,13 @@ export class SimpleArbitrage extends BaseStrategy {
       });
 
     } finally {
+      // Release balance reservations
+      this.exchangeManager.releaseReservation(tradeKey);
+
       // Mark trade as completed
       this.activeTrades.delete(tradeKey);
       execution.executionTime = Date.now() - execution.executionTime;
-      
+
       // Record the execution
       this.recordExecution(execution);
     }

@@ -3,17 +3,65 @@
  */
 
 import * as dotenv from 'dotenv';
-import type { 
-  BotConfig, 
-  ExchangeId, 
-  ExchangeConfig, 
+import type {
+  BotConfig,
+  ExchangeId,
+  ExchangeConfig,
   StrategyConfig,
-  LogLevel 
+  LogLevel
 } from '@/types';
 import { createExchangeConfig, validateExchangeConfig } from './exchanges';
 
 // Load environment variables
 dotenv.config();
+
+/**
+ * Deferred warnings queue for handling circular dependency with logger.
+ * Warnings are queued during config initialization and flushed once logger is available.
+ */
+interface DeferredWarning {
+  message: string;
+  meta: Record<string, unknown> | undefined;
+}
+const deferredWarnings: DeferredWarning[] = [];
+let loggerReady = false;
+let loggerModule: typeof import('@utils/logger') | null = null;
+
+/**
+ * Log a warning, deferring it if logger isn't ready yet (during config initialization)
+ */
+function logWarning(message: string, meta?: Record<string, unknown>): void {
+  if (loggerReady && loggerModule) {
+    if (meta !== undefined) {
+      loggerModule.logger.warn(message, meta);
+    } else {
+      loggerModule.logger.warn(message);
+    }
+  } else {
+    deferredWarnings.push({ message, meta });
+  }
+}
+
+/**
+ * Flush any deferred warnings once logger is available.
+ * Called after CONFIG is fully initialized.
+ */
+async function flushDeferredWarnings(): Promise<void> {
+  try {
+    loggerModule = await import('@utils/logger');
+    loggerReady = true;
+    for (const { message, meta } of deferredWarnings) {
+      if (meta !== undefined) {
+        loggerModule.logger.warn(message, meta);
+      } else {
+        loggerModule.logger.warn(message);
+      }
+    }
+    deferredWarnings.length = 0;
+  } catch {
+    // If logger import fails, warnings remain in console only (already printed if needed)
+  }
+}
 
 /**
  * Environment variable helper with type safety
@@ -113,10 +161,10 @@ function loadExchangeConfigs(): ExchangeConfig[] {
       if (validateExchangeConfig(config)) {
         configs.push(config);
       } else {
-        console.warn(`Invalid configuration for exchange ${exchangeId}, skipping...`);
+        logWarning(`Invalid configuration for exchange ${exchangeId}, skipping...`);
       }
     } catch (error) {
-      console.warn(`Failed to load configuration for exchange ${exchangeId}:`, error);
+      logWarning(`Failed to load configuration for exchange ${exchangeId}:`, { error });
     }
   }
 
@@ -179,6 +227,9 @@ function createBotConfig(): BotConfig {
  * Global configuration instance
  */
 export const CONFIG = createBotConfig();
+
+// Flush any warnings that were deferred during config initialization
+flushDeferredWarnings();
 
 /**
  * Configuration validation

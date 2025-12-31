@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Remove unused `_isBuy` parameter from `calculateWeightedAveragePrice` function in `src/utils/calculations.ts`
+- Replace `console.warn` with Winston logger in config module for consistent logging
+- Add deferred warning queue pattern to handle circular dependency between config and logger modules
 
 ### Security
 - Fixed high severity vulnerability in glob 10.2.0-10.4.5 (command injection via `-c/--cmd`)

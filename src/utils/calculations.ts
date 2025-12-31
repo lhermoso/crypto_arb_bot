@@ -232,8 +232,7 @@ export function getOrderBookSpread(orderBook: OrderBook): number {
  */
 export function calculateWeightedAveragePrice(
   orders: [number, number][],
-  targetAmount: number,
-  _isBuy = false
+  targetAmount: number
 ): { averagePrice: number; totalAmount: number; totalCost: number } | null {
   
   if (!orders || orders.length === 0 || targetAmount <= 0) {
@@ -279,7 +278,7 @@ export function estimateSlippage(
   }
 
   const bestPrice = orders[0][0];
-  const weightedAverage = calculateWeightedAveragePrice(orders as [number, number][], amount, side === 'buy');
+  const weightedAverage = calculateWeightedAveragePrice(orders as [number, number][], amount);
 
   if (!weightedAverage) {
     return 100;

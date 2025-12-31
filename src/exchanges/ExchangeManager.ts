@@ -346,6 +346,7 @@ export class ExchangeManager extends EventEmitter {
         symbol: order.symbol,
         side: order.side,
         amount: result.filled || order.amount,
+        filled: result.filled || order.amount,
         price: result.average || order.price || 0,
         cost: result.cost || 0,
         fee: result.fee?.cost || 0,
@@ -363,6 +364,7 @@ export class ExchangeManager extends EventEmitter {
         symbol: order.symbol,
         side: order.side,
         amount: order.amount,
+        filled: 0,
         price: order.price || 0,
         cost: 0,
         fee: 0,
@@ -373,7 +375,7 @@ export class ExchangeManager extends EventEmitter {
 
       this.handleExchangeError(instance, error as Error, 'executeTrade');
       logger.error(`Trade execution failed on ${order.exchange}:`, error);
-      
+
       return tradeResult;
     }
   }

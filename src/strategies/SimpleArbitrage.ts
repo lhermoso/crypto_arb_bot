@@ -386,21 +386,60 @@ export class SimpleArbitrage extends BaseStrategy {
         type: 'market',
       };
 
-      // Execute trades concurrently with timeout
-      const [buyResult, sellResult] = await withTimeout(
-        Promise.all([
-          retry(() => this.exchangeManager.executeTrade(buyOrder), 2),
-          retry(() => this.exchangeManager.executeTrade(sellOrder), 2),
-        ]),
+      // Execute buy order first to avoid naked short positions
+      // If buy fails, we must NOT execute the sell order
+      const buyResult = await withTimeout(
+        retry(() => this.exchangeManager.executeTrade(buyOrder), 2),
         config.params.orderTimeout,
-        'Trade execution timeout'
+        'Buy order timeout'
       );
 
       execution.buyTrade = buyResult;
+
+      if (!buyResult.success) {
+        execution.success = false;
+        execution.errors.push(`Buy order failed: ${buyResult.error}`);
+
+        logger.error('Arbitrage trade failed - buy order unsuccessful, sell order not attempted', {
+          symbol: opportunity.symbol,
+          buyExchange: opportunity.buyExchange,
+          error: buyResult.error,
+        });
+
+        TradeLogger.logTradeExecution({
+          symbol: opportunity.symbol,
+          exchanges: [opportunity.buyExchange, opportunity.sellExchange],
+          success: false,
+          error: `Buy order failed: ${buyResult.error}`,
+        });
+
+        return;
+      }
+
+      // Determine sell amount based on actual filled amount from buy order
+      // This handles partial fills correctly
+      const actualBuyAmount = buyResult.filled || opportunity.amount;
+
+      if (actualBuyAmount < opportunity.amount) {
+        logger.warn('Buy order partially filled, adjusting sell amount', {
+          symbol: opportunity.symbol,
+          expectedAmount: opportunity.amount,
+          actualAmount: actualBuyAmount,
+        });
+        sellOrder.amount = actualBuyAmount;
+      }
+
+      // Buy succeeded, now execute sell order
+      const sellResult = await withTimeout(
+        retry(() => this.exchangeManager.executeTrade(sellOrder), 2),
+        config.params.orderTimeout,
+        'Sell order timeout'
+      );
+
       execution.sellTrade = sellResult;
 
       // Calculate actual profit
-      if (buyResult.success && sellResult.success) {
+      if (sellResult.success) {
         const totalCost = buyResult.cost + buyResult.fee;
         const totalRevenue = sellResult.cost - sellResult.fee;
         execution.actualProfit = totalRevenue - totalCost;
@@ -423,27 +462,21 @@ export class SimpleArbitrage extends BaseStrategy {
 
       } else {
         execution.success = false;
-        
-        if (!buyResult.success) {
-          execution.errors.push(`Buy order failed: ${buyResult.error}`);
-        }
-        
-        if (!sellResult.success) {
-          execution.errors.push(`Sell order failed: ${sellResult.error}`);
-        }
+        execution.errors.push(`Sell order failed after successful buy: ${sellResult.error}`);
 
-        logger.error('Arbitrage trade failed', {
+        logger.error('Arbitrage trade partially failed - buy succeeded but sell failed', {
           symbol: opportunity.symbol,
-          buySuccess: buyResult.success,
-          sellSuccess: sellResult.success,
-          errors: execution.errors,
+          buyExchange: opportunity.buyExchange,
+          sellExchange: opportunity.sellExchange,
+          buyAmount: actualBuyAmount,
+          sellError: sellResult.error,
         });
 
         TradeLogger.logTradeExecution({
           symbol: opportunity.symbol,
           exchanges: [opportunity.buyExchange, opportunity.sellExchange],
           success: false,
-          error: execution.errors.join('; '),
+          error: `Sell order failed after successful buy: ${sellResult.error}`,
         });
       }
 

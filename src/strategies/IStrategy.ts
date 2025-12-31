@@ -3,13 +3,15 @@
  */
 
 import { EventEmitter } from 'events';
-import type { 
-  Symbol, 
-  ArbitrageOpportunity, 
+import type {
+  Symbol,
+  ArbitrageOpportunity,
   ArbitrageExecution,
-  StrategyConfig 
+  StrategyConfig
 } from '@/types';
 import type { ExchangeManager } from '@exchanges/ExchangeManager';
+import { getMinTradeAmount } from '@/config/exchanges';
+import { logger } from '@utils/logger';
 
 /**
  * Base strategy interface that all trading strategies must implement
@@ -218,9 +220,24 @@ export abstract class BaseStrategy extends EventEmitter implements IStrategy {
       return false;
     }
 
-    return opportunity.amount <= this.config.maxTradeAmount;
+    if (opportunity.amount > this.config.maxTradeAmount) {
+      return false;
+    }
 
+    // Validate against minimum trade amount for the symbol
+    const minTradeAmount = getMinTradeAmount(opportunity.symbol);
+    if (opportunity.amount < minTradeAmount) {
+      logger.debug('Opportunity skipped: amount below minimum trade amount', {
+        symbol: opportunity.symbol,
+        amount: opportunity.amount,
+        minTradeAmount,
+        buyExchange: opportunity.buyExchange,
+        sellExchange: opportunity.sellExchange,
+      });
+      return false;
+    }
 
+    return true;
   }
 
   /**

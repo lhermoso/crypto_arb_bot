@@ -35,6 +35,7 @@ interface SimpleArbitrageConfig extends StrategyConfig {
     balanceReservePercent: number;
     maxOpportunityAge: number;
     priceValidationWindow: number;
+    partialFillThreshold: number;
   };
 }
 
@@ -61,6 +62,7 @@ export class SimpleArbitrage extends BaseStrategy {
       balanceReservePercent: 10, // 10% reserve
       maxOpportunityAge: 5000, // 5 seconds
       priceValidationWindow: 2000, // 2 seconds
+      partialFillThreshold: 95, // 95% minimum fill required
       ...this.config.params,
     };
 
@@ -419,13 +421,49 @@ export class SimpleArbitrage extends BaseStrategy {
       // Determine sell amount based on actual filled amount from buy order
       // This handles partial fills correctly
       const actualBuyAmount = buyResult.filled || opportunity.amount;
+      const fillPercent = (actualBuyAmount / opportunity.amount) * 100;
+      const isPartialFill = fillPercent < 100;
+      const partialFillThreshold = config.params.partialFillThreshold;
 
-      if (actualBuyAmount < opportunity.amount) {
-        logger.warn('Buy order partially filled, adjusting sell amount', {
+      if (isPartialFill) {
+        logger.warn('Buy order partially filled', {
           symbol: opportunity.symbol,
-          expectedAmount: opportunity.amount,
-          actualAmount: actualBuyAmount,
+          requestedAmount: opportunity.amount,
+          filledAmount: actualBuyAmount,
+          fillPercent: fillPercent.toFixed(2),
+          threshold: partialFillThreshold,
         });
+      }
+
+      // Reject if fill is below threshold
+      if (fillPercent < partialFillThreshold) {
+        execution.success = false;
+        execution.errors.push(
+          `Partial fill rejected: ${fillPercent.toFixed(2)}% filled (threshold: ${partialFillThreshold}%). ` +
+          `Bought ${actualBuyAmount} of ${opportunity.amount} requested. Manual intervention may be required.`
+        );
+
+        logger.error('Arbitrage trade aborted - partial fill below threshold', {
+          symbol: opportunity.symbol,
+          buyExchange: opportunity.buyExchange,
+          requestedAmount: opportunity.amount,
+          filledAmount: actualBuyAmount,
+          fillPercent: fillPercent.toFixed(2),
+          threshold: partialFillThreshold,
+        });
+
+        TradeLogger.logTradeExecution({
+          symbol: opportunity.symbol,
+          exchanges: [opportunity.buyExchange, opportunity.sellExchange],
+          success: false,
+          error: `Partial fill rejected: ${fillPercent.toFixed(2)}% < ${partialFillThreshold}% threshold`,
+        });
+
+        return;
+      }
+
+      // Adjust sell amount to match actual filled amount
+      if (isPartialFill) {
         sellOrder.amount = actualBuyAmount;
       }
 
@@ -451,6 +489,11 @@ export class SimpleArbitrage extends BaseStrategy {
           actualProfit: execution.actualProfit,
           buyPrice: buyResult.price,
           sellPrice: sellResult.price,
+          requestedAmount: opportunity.amount,
+          actualBuyAmount,
+          actualSellAmount: sellResult.amount,
+          partialFill: isPartialFill,
+          fillPercent: fillPercent.toFixed(2),
         });
 
         TradeLogger.logTradeExecution({

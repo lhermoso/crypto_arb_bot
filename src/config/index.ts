@@ -199,6 +199,7 @@ function loadStrategyConfigs(): StrategyConfig[] {
         // Strategy-specific parameters can be added here
         checkInterval: EnvLoader.getNumber(`${upperStrategyName}_CHECK_INTERVAL`, 5000),
         maxSlippage: EnvLoader.getNumber(`${upperStrategyName}_MAX_SLIPPAGE`, 0.1),
+        partialFillThreshold: EnvLoader.getNumber(`${upperStrategyName}_PARTIAL_FILL_THRESHOLD`, 95),
       },
     });
   }

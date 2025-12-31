@@ -145,27 +145,51 @@ export class ExchangeManager extends EventEmitter {
   }
 
   /**
+   * Order book depth limits for each supported exchange
+   * Maps exchange ID to array of valid limits (sorted ascending) and maximum limit
+   */
+  private static readonly ORDER_BOOK_LIMITS: Record<string, { validLimits: number[]; maxLimit: number }> = {
+    // KuCoin: only accepts 5, 20, 50, or 100
+    kucoin: { validLimits: [5, 20, 50, 100], maxLimit: 100 },
+    // Bybit: only accepts 1, 50, 200, or 1000 for spot markets
+    bybit: { validLimits: [1, 50, 200, 1000], maxLimit: 1000 },
+    // Binance: accepts 5, 10, 20, 50, 100, 500, 1000, 5000
+    binance: { validLimits: [5, 10, 20, 50, 100, 500, 1000, 5000], maxLimit: 5000 },
+    // OKX: accepts 1-400 for REST, 1, 5, 40, 100, 400 for WebSocket
+    okx: { validLimits: [1, 5, 40, 100, 400], maxLimit: 400 },
+    // Kraken: accepts 1-500 for REST, 10, 25, 100, 500, 1000 for WebSocket
+    kraken: { validLimits: [10, 25, 100, 500, 1000], maxLimit: 1000 },
+  };
+
+  /**
    * Get exchange-compatible order book limit
+   * Rounds up to nearest valid limit for the exchange and logs a warning if capped
    */
   private getExchangeCompatibleLimit(exchangeId: ExchangeId, requestedLimit: number): number | undefined {
-    // KuCoin only accepts undefined, 5, 20, 50, or 100
-    if (exchangeId.toLowerCase() === 'kucoin') {
-      if (requestedLimit <= 5) return 5;
-      if (requestedLimit <= 20) return 20;
-      if (requestedLimit <= 50) return 50;
-      return 100;
+    const exchangeLimits = ExchangeManager.ORDER_BOOK_LIMITS[exchangeId.toLowerCase()];
+
+    // For exchanges without defined limits, use the requested limit
+    if (!exchangeLimits) {
+      return requestedLimit;
     }
-    
-    // Bybit only accepts 1, 50, 200, or 1000 for spot markets
-    if (exchangeId.toLowerCase() === 'bybit') {
-      if (requestedLimit <= 1) return 1;
-      if (requestedLimit <= 50) return 50;
-      if (requestedLimit <= 200) return 200;
-      return 1000;
+
+    const { validLimits, maxLimit } = exchangeLimits;
+
+    // Log warning if requested depth exceeds exchange maximum
+    if (requestedLimit > maxLimit) {
+      logger.warn(`Requested order book depth ${requestedLimit} exceeds ${exchangeId} maximum of ${maxLimit}, capping to ${maxLimit}`);
+      return maxLimit;
     }
-    
-    // For other exchanges, use the requested limit
-    return requestedLimit;
+
+    // Find the smallest valid limit that satisfies the request
+    for (const limit of validLimits) {
+      if (requestedLimit <= limit) {
+        return limit;
+      }
+    }
+
+    // Fallback to max limit if no suitable limit found
+    return maxLimit;
   }
 
   /**

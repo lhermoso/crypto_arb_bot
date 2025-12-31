@@ -29,9 +29,11 @@ import { logger } from '@utils/logger';
 export class ExchangeManager extends EventEmitter {
   private exchanges = new Map<ExchangeId, ExchangeInstance>();
   private subscriptions = new Map<string, MarketSubscription>();
-  private reconnectIntervals = new Map<ExchangeId, NodeJS.Timeout>();
+  private reconnectTimeouts = new Map<ExchangeId, NodeJS.Timeout>();
+  private reconnectAttempts = new Map<ExchangeId, number>();
   private readonly maxReconnectAttempts = 5;
-  private readonly reconnectDelay = 5000; // 5 seconds
+  private readonly initialReconnectDelay = 5000; // 5 seconds
+  private readonly maxReconnectDelay = 300000; // 5 minutes
 
   constructor(private configs: ExchangeConfig[]) {
     super();
@@ -484,38 +486,72 @@ export class ExchangeManager extends EventEmitter {
   }
 
   /**
-   * Start reconnection process for an exchange
+   * Calculate exponential backoff delay
+   */
+  private calculateBackoffDelay(attemptCount: number): number {
+    // Exponential backoff: initialDelay * 2^(attempt - 1)
+    const delay = this.initialReconnectDelay * Math.pow(2, attemptCount - 1);
+    return Math.min(delay, this.maxReconnectDelay);
+  }
+
+  /**
+   * Start reconnection process for an exchange with exponential backoff
    */
   private startReconnection(instance: ExchangeInstance): void {
-    if (this.reconnectIntervals.has(instance.id)) {
+    if (this.reconnectTimeouts.has(instance.id)) {
       return; // Already reconnecting
     }
 
     logger.warn(`Starting reconnection for exchange ${instance.id}`);
     instance.status = 'reconnecting';
 
-    const reconnectInterval = setInterval(async () => {
+    // Initialize attempt counter if not exists
+    if (!this.reconnectAttempts.has(instance.id)) {
+      this.reconnectAttempts.set(instance.id, 0);
+    }
+
+    this.scheduleReconnect(instance);
+  }
+
+  /**
+   * Schedule a reconnection attempt with exponential backoff
+   */
+  private scheduleReconnect(instance: ExchangeInstance): void {
+    const currentAttempt = (this.reconnectAttempts.get(instance.id) || 0) + 1;
+    this.reconnectAttempts.set(instance.id, currentAttempt);
+
+    const delay = this.calculateBackoffDelay(currentAttempt);
+
+    logger.info(`Scheduling reconnection attempt ${currentAttempt} for ${instance.id} in ${delay / 1000}s`);
+
+    const reconnectTimeout = setTimeout(async () => {
       try {
+        logger.info(`Reconnection attempt ${currentAttempt} for exchange ${instance.id}`);
+
         // Try to reload markets to test connection
         await instance.exchange.loadMarkets(true);
-        
+
         instance.status = 'connected';
         instance.errorCount = 0;
         instance.lastUpdate = Date.now();
 
-        logger.info(`Successfully reconnected to exchange ${instance.id}`);
+        logger.info(`Successfully reconnected to exchange ${instance.id} after ${currentAttempt} attempt(s)`);
         this.emit('exchangeConnected', instance);
 
-        // Clear reconnection interval
-        clearInterval(reconnectInterval);
-        this.reconnectIntervals.delete(instance.id);
+        // Reset reconnection state on success
+        this.reconnectTimeouts.delete(instance.id);
+        this.reconnectAttempts.delete(instance.id);
 
       } catch (error) {
-        logger.warn(`Reconnection attempt failed for ${instance.id}:`, error);
-      }
-    }, this.reconnectDelay);
+        logger.warn(`Reconnection attempt ${currentAttempt} failed for ${instance.id}:`, error);
 
-    this.reconnectIntervals.set(instance.id, reconnectInterval);
+        // Clear current timeout and schedule next attempt
+        this.reconnectTimeouts.delete(instance.id);
+        this.scheduleReconnect(instance);
+      }
+    }, delay);
+
+    this.reconnectTimeouts.set(instance.id, reconnectTimeout);
   }
 
   /**
@@ -524,11 +560,12 @@ export class ExchangeManager extends EventEmitter {
   async shutdown(): Promise<void> {
     logger.info('Shutting down exchange manager...');
 
-    // Clear all intervals
-    for (const interval of this.reconnectIntervals.values()) {
-      clearInterval(interval);
+    // Clear all reconnection timeouts
+    for (const timeout of this.reconnectTimeouts.values()) {
+      clearTimeout(timeout);
     }
-    this.reconnectIntervals.clear();
+    this.reconnectTimeouts.clear();
+    this.reconnectAttempts.clear();
 
     // Close all exchange connections
     for (const [exchangeId, instance] of this.exchanges) {

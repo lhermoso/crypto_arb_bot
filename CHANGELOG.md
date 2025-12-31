@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix price validation tolerance being too loose causing systematic profit erosion by making tolerance configurable and adding profit-aware validation
 - Add order book depth limits for all supported exchanges (Binance, OKX, Kraken) in ExchangeManager
 - Automatically cap depth requests to exchange maximum with warning log when exceeded
+- Validate trade amounts against minimum trade amount using `getMinTradeAmount()` during opportunity validation to prevent order rejections
 - Fix race condition in concurrent order execution that could cause naked short positions by executing buy order before sell order
 - Add partial fill threshold validation (default 95%) to reject trades with insufficient fill and prevent position mismatch
 - Adjust sell order amount to match actual buy fill amount for partial fills above threshold

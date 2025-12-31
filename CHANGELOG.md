@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add balance reservation system to lock/reserve funds during execution window and prevent concurrent use
 - Fix race condition in activeTrades Set allowing duplicate trade execution by making check-and-add atomic
 - Use exchange-provided timestamps for arbitrage opportunity age validation instead of local clock to prevent trading on stale data when clock skew exists
+- Validate order book data freshness using exchange timestamps to prevent trading on stale prices
+- Reject order book data older than configurable threshold (default 500ms) with warning logs
+- Add order book staleness metrics tracking (total/stale updates, data age statistics)
 - Fix race condition in concurrent order execution that could cause naked short positions by executing buy order before sell order
 - Add partial fill threshold validation (default 95%) to reject trades with insufficient fill and prevent position mismatch
 - Adjust sell order amount to match actual buy fill amount for partial fills above threshold

@@ -24,7 +24,7 @@ import {
   FeeGetter
 } from '@utils/calculations';
 import { logger, TradeLogger, performanceLogger } from '@utils/logger';
-import { sleep, withTimeout, retry } from '@utils/helpers';
+import { sleep, withTimeout, generateClientOrderId } from '@utils/helpers';
 
 /**
  * Price validation result with variance tracking
@@ -565,13 +565,19 @@ export class SimpleArbitrage extends BaseStrategy {
 
       this.emit('execution_started', execution);
 
-      // Create trade orders
+      // Generate unique client order IDs for idempotency
+      // These IDs ensure that retries don't create duplicate orders
+      const buyClientOrderId = generateClientOrderId();
+      const sellClientOrderId = generateClientOrderId();
+
+      // Create trade orders with clientOrderId for idempotency
       const buyOrder: TradeOrder = {
         exchange: opportunity.buyExchange,
         symbol: opportunity.symbol,
         side: 'buy',
         amount: opportunity.amount,
         type: 'market',
+        params: { clientOrderId: buyClientOrderId },
       };
 
       const sellOrder: TradeOrder = {
@@ -580,12 +586,16 @@ export class SimpleArbitrage extends BaseStrategy {
         side: 'sell',
         amount: opportunity.amount,
         type: 'market',
+        params: { clientOrderId: sellClientOrderId },
       };
 
       // Execute buy order first to avoid naked short positions
       // If buy fails, we must NOT execute the sell order
+      // Note: We no longer use retry() wrapper here to prevent cascading duplicate fills
+      // The ExchangeManager.executeTrade() now handles idempotency internally via clientOrderId
+      // and checks for existing orders on timeout errors
       const buyResult = await withTimeout(
-        retry(() => this.exchangeManager.executeTrade(buyOrder), 2),
+        this.exchangeManager.executeTrade(buyOrder),
         config.params.orderTimeout,
         'Buy order timeout'
       );
@@ -600,6 +610,7 @@ export class SimpleArbitrage extends BaseStrategy {
           symbol: opportunity.symbol,
           buyExchange: opportunity.buyExchange,
           error: buyResult.error,
+          clientOrderId: buyClientOrderId,
         });
 
         TradeLogger.logTradeExecution({
@@ -662,8 +673,9 @@ export class SimpleArbitrage extends BaseStrategy {
       }
 
       // Buy succeeded, now execute sell order
+      // Note: We no longer use retry() wrapper here to prevent cascading duplicate fills
       const sellResult = await withTimeout(
-        retry(() => this.exchangeManager.executeTrade(sellOrder), 2),
+        this.exchangeManager.executeTrade(sellOrder),
         config.params.orderTimeout,
         'Sell order timeout'
       );

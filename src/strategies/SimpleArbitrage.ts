@@ -11,7 +11,9 @@ import type {
   ArbitrageExecution,
   TradeOrder,
   StrategyConfig,
-  MarketData
+  MarketData,
+  ExchangeId,
+  ShutdownBehavior
 } from '@/types';
 import { CONFIG } from '@/config';
 import type { ExchangeManager } from '@exchanges/ExchangeManager';
@@ -38,6 +40,18 @@ interface PriceValidationResult {
   sellPriceVariance?: number; // Percentage variance from expected
   totalVariance?: number;     // Combined variance impact on profit
   reason?: string;
+}
+
+/**
+ * Pending order information for tracking and cancellation
+ */
+interface PendingOrder {
+  orderId: string;
+  exchange: ExchangeId;
+  symbol: Symbol;
+  side: 'buy' | 'sell';
+  amount: number;
+  timestamp: number;
 }
 
 /**
@@ -73,6 +87,7 @@ export class SimpleArbitrage extends BaseStrategy {
   }> = [];
   private feeGetter: FeeGetter;
   private statePersistence: TradeStatePersistence;
+  private pendingOrders = new Map<string, PendingOrder>();
 
   constructor(
     name: string,
@@ -177,24 +192,133 @@ export class SimpleArbitrage extends BaseStrategy {
       this.monitoringInterval = undefined as any;
     }
 
-    // Wait for active trades to complete
+    const shutdownBehavior: ShutdownBehavior = CONFIG.general.shutdownBehavior;
+    logger.info(`Shutdown behavior: ${shutdownBehavior}`);
+
+    // Handle shutdown based on configured behavior
+    if (shutdownBehavior === 'force') {
+      logger.warn('Force shutdown - skipping order cancellation and wait');
+      if (this.activeTrades.size > 0 || this.pendingOrders.size > 0) {
+        logger.warn('WARNING: Force exit with active trades/pending orders', {
+          activeTrades: this.activeTrades.size,
+          pendingOrders: this.pendingOrders.size,
+        });
+      }
+      logger.info('SimpleArbitrage strategy stopped (force mode)');
+      return;
+    }
+
+    // Wait for active trades to complete (both 'cancel' and 'wait' modes)
     if (this.activeTrades.size > 0) {
       logger.info(`Waiting for ${this.activeTrades.size} active trades to complete...`);
-      
+
       let waitTime = 0;
       const maxWaitTime = 60000; // 60 seconds max wait
-      
+
       while (this.activeTrades.size > 0 && waitTime < maxWaitTime) {
         await sleep(1000);
         waitTime += 1000;
       }
 
       if (this.activeTrades.size > 0) {
-        logger.warn(`Strategy stopped with ${this.activeTrades.size} trades still active`);
+        logger.warn(`Timeout waiting for trades - ${this.activeTrades.size} still active`);
       }
     }
 
+    // Cancel pending orders if configured to do so
+    if (shutdownBehavior === 'cancel') {
+      await this.cancelPendingOrders();
+    } else if (shutdownBehavior === 'wait' && this.pendingOrders.size > 0) {
+      logger.warn('Shutdown behavior is "wait" - pending orders will NOT be cancelled', {
+        pendingOrders: Array.from(this.pendingOrders.values()).map(o => ({
+          orderId: o.orderId,
+          exchange: o.exchange,
+          symbol: o.symbol,
+          side: o.side,
+        })),
+      });
+      logger.warn('MANUAL ACTION REQUIRED: Check exchanges for pending orders');
+    }
+
     logger.info('SimpleArbitrage strategy stopped');
+  }
+
+  /**
+   * Cancel all pending orders during shutdown
+   */
+  private async cancelPendingOrders(): Promise<void> {
+    if (this.pendingOrders.size === 0) {
+      logger.info('No pending orders to cancel');
+      return;
+    }
+
+    logger.info(`Cancelling ${this.pendingOrders.size} pending orders...`);
+    const cancelled: string[] = [];
+    const failed: Array<{ orderId: string; exchange: string; error: string }> = [];
+
+    for (const [orderId, order] of this.pendingOrders) {
+      try {
+        logger.info(`Cancelling order ${orderId} on ${order.exchange}`, {
+          symbol: order.symbol,
+          side: order.side,
+          amount: order.amount,
+        });
+
+        const success = await this.exchangeManager.cancelOrder(order.exchange, orderId, order.symbol);
+
+        if (success) {
+          cancelled.push(orderId);
+          logger.info(`Successfully cancelled order ${orderId} on ${order.exchange}`);
+        } else {
+          failed.push({ orderId, exchange: order.exchange, error: 'Order not found or already processed' });
+        }
+      } catch (error) {
+        const errorMessage = (error as Error).message;
+        failed.push({ orderId, exchange: order.exchange, error: errorMessage });
+        logger.error(`Failed to cancel order ${orderId} on ${order.exchange}: ${errorMessage}`);
+      }
+    }
+
+    // Clear pending orders map
+    this.pendingOrders.clear();
+
+    // Log summary
+    logger.info('Order cancellation summary', {
+      totalOrders: cancelled.length + failed.length,
+      cancelled: cancelled.length,
+      failed: failed.length,
+    });
+
+    if (failed.length > 0) {
+      logger.warn('WARNING: Some orders could not be cancelled - MANUAL ACTION REQUIRED', {
+        failedOrders: failed,
+      });
+    }
+  }
+
+  /**
+   * Track a pending order for potential cancellation during shutdown
+   */
+  private trackPendingOrder(orderId: string, exchange: ExchangeId, symbol: Symbol, side: 'buy' | 'sell', amount: number): void {
+    if (!orderId) return;
+    this.pendingOrders.set(orderId, {
+      orderId,
+      exchange,
+      symbol,
+      side,
+      amount,
+      timestamp: Date.now(),
+    });
+    logger.debug(`Tracking pending order ${orderId} on ${exchange}`);
+  }
+
+  /**
+   * Remove a tracked pending order (when filled or cancelled)
+   */
+  private untrackPendingOrder(orderId: string): void {
+    if (this.pendingOrders.delete(orderId)) {
+      logger.debug(`Untracked pending order ${orderId}`);
+    }
   }
 
   /**
@@ -782,10 +906,20 @@ export class SimpleArbitrage extends BaseStrategy {
         'Buy order timeout'
       );
 
+      // Track the buy order for potential cancellation during shutdown
+      if (buyResult.orderId) {
+        this.trackPendingOrder(buyResult.orderId, opportunity.buyExchange, opportunity.symbol, 'buy', opportunity.amount);
+      }
+
       execution.buyTrade = buyResult;
 
       // Persist buy result immediately
       await this.statePersistence.recordBuyExecuted(tradeKey, buyResult);
+
+      // Untrack buy order since it completed (success or fail)
+      if (buyResult.orderId) {
+        this.untrackPendingOrder(buyResult.orderId);
+      }
 
       if (!buyResult.success) {
         execution.success = false;
@@ -865,7 +999,17 @@ export class SimpleArbitrage extends BaseStrategy {
         'Sell order timeout'
       );
 
+      // Track the sell order for potential cancellation during shutdown
+      if (sellResult.orderId) {
+        this.trackPendingOrder(sellResult.orderId, opportunity.sellExchange, opportunity.symbol, 'sell', sellOrder.amount);
+      }
+
       execution.sellTrade = sellResult;
+
+      // Untrack sell order since it completed (success or fail)
+      if (sellResult.orderId) {
+        this.untrackPendingOrder(sellResult.orderId);
+      }
 
       // Calculate actual profit
       if (sellResult.success) {
@@ -971,6 +1115,7 @@ export class SimpleArbitrage extends BaseStrategy {
     return {
       ...baseStatus,
       activeTrades: this.activeTrades.size,
+      pendingOrders: this.pendingOrders.size,
       marketDataAge: this.getMarketDataAge(),
       profitVarianceStats: this.getProfitVarianceStats(),
       config: this.config,

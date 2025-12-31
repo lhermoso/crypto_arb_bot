@@ -35,6 +35,7 @@ export interface ExchangeInstance {
     fetchBalance: boolean;
     createOrder: boolean;
     cancelOrder: boolean;
+    fetchOpenOrders: boolean;
   };
 }
 

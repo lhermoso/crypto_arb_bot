@@ -199,6 +199,7 @@ export class ExchangeManager extends EventEmitter {
         fetchBalance: exchange.has?.['fetchBalance'] === true,
         createOrder: exchange.has?.['createOrder'] === true,
         cancelOrder: exchange.has?.['cancelOrder'] === true,
+        fetchOpenOrders: exchange.has?.['fetchOpenOrders'] === true,
       };
 
       const instance: ExchangeInstance = {
@@ -901,6 +902,104 @@ export class ExchangeManager extends EventEmitter {
     }
 
     return marketData;
+  }
+
+  /**
+   * Cancel an order on a specific exchange
+   */
+  async cancelOrder(exchangeId: ExchangeId, orderId: string, symbol: Symbol): Promise<boolean> {
+    const instance = this.exchanges.get(exchangeId);
+    if (!instance) {
+      throw new Error(`Exchange ${exchangeId} not found`);
+    }
+
+    if (!instance.capabilities.cancelOrder) {
+      throw new Error(`Exchange ${exchangeId} does not support order cancellation`);
+    }
+
+    try {
+      logger.info(`Cancelling order ${orderId} on ${exchangeId}`, { symbol });
+      await instance.exchange.cancelOrder(orderId, symbol);
+      logger.info(`Order ${orderId} cancelled successfully on ${exchangeId}`);
+      return true;
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      // Order may already be filled or cancelled
+      if (errorMessage.includes('not found') ||
+          errorMessage.includes('already') ||
+          errorMessage.includes('filled') ||
+          errorMessage.includes('cancelled')) {
+        logger.warn(`Order ${orderId} on ${exchangeId} could not be cancelled: ${errorMessage}`);
+        return false;
+      }
+      this.handleExchangeError(instance, error as Error, 'cancelOrder');
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch open orders for a symbol on a specific exchange
+   */
+  async fetchOpenOrders(exchangeId: ExchangeId, symbol?: Symbol): Promise<Array<{ id: string; symbol: string; side: string; amount: number; price: number }>> {
+    const instance = this.exchanges.get(exchangeId);
+    if (!instance) {
+      throw new Error(`Exchange ${exchangeId} not found`);
+    }
+
+    if (!instance.capabilities.fetchOpenOrders) {
+      logger.warn(`Exchange ${exchangeId} does not support fetching open orders`);
+      return [];
+    }
+
+    try {
+      const orders = await instance.exchange.fetchOpenOrders(symbol);
+      return orders.map(order => ({
+        id: order.id,
+        symbol: order.symbol,
+        side: order.side,
+        amount: order.amount,
+        price: order.price || 0,
+      }));
+    } catch (error) {
+      this.handleExchangeError(instance, error as Error, 'fetchOpenOrders');
+      throw error;
+    }
+  }
+
+  /**
+   * Cancel all open orders for a symbol on all exchanges
+   */
+  async cancelAllOrders(symbol?: Symbol): Promise<{ cancelled: Array<{ exchange: ExchangeId; orderId: string; symbol: string }>; failed: Array<{ exchange: ExchangeId; orderId: string; symbol: string; error: string }> }> {
+    const cancelled: Array<{ exchange: ExchangeId; orderId: string; symbol: string }> = [];
+    const failed: Array<{ exchange: ExchangeId; orderId: string; symbol: string; error: string }> = [];
+
+    for (const [exchangeId, instance] of this.exchanges) {
+      if (!instance.capabilities.cancelOrder) {
+        logger.warn(`Exchange ${exchangeId} does not support order cancellation, skipping...`);
+        continue;
+      }
+
+      try {
+        const openOrders = await this.fetchOpenOrders(exchangeId, symbol);
+
+        for (const order of openOrders) {
+          try {
+            const success = await this.cancelOrder(exchangeId, order.id, order.symbol);
+            if (success) {
+              cancelled.push({ exchange: exchangeId, orderId: order.id, symbol: order.symbol });
+            } else {
+              failed.push({ exchange: exchangeId, orderId: order.id, symbol: order.symbol, error: 'Order not found or already processed' });
+            }
+          } catch (error) {
+            failed.push({ exchange: exchangeId, orderId: order.id, symbol: order.symbol, error: (error as Error).message });
+          }
+        }
+      } catch (error) {
+        logger.error(`Failed to fetch/cancel orders on ${exchangeId}:`, error);
+      }
+    }
+
+    return { cancelled, failed };
   }
 
   /**

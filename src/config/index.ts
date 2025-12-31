@@ -8,7 +8,8 @@ import type {
   ExchangeId,
   ExchangeConfig,
   StrategyConfig,
-  LogLevel
+  LogLevel,
+  ShutdownBehavior
 } from '@/types';
 import { createExchangeConfig, validateExchangeConfig } from './exchanges';
 
@@ -211,6 +212,19 @@ function loadStrategyConfigs(): StrategyConfig[] {
 }
 
 /**
+ * Validates and returns a shutdown behavior value
+ */
+function getShutdownBehavior(value: string): ShutdownBehavior {
+  const validBehaviors: ShutdownBehavior[] = ['cancel', 'wait', 'force'];
+  const normalizedValue = value.toLowerCase() as ShutdownBehavior;
+  if (validBehaviors.includes(normalizedValue)) {
+    return normalizedValue;
+  }
+  logWarning(`Invalid SHUTDOWN_BEHAVIOR "${value}", defaulting to "cancel"`, { value });
+  return 'cancel';
+}
+
+/**
  * Creates the complete bot configuration
  */
 function createBotConfig(): BotConfig {
@@ -223,6 +237,7 @@ function createBotConfig(): BotConfig {
       maxConcurrentTrades: EnvLoader.getNumber('MAX_CONCURRENT_TRADES', 3),
       orderBookDepth: EnvLoader.getNumber('ORDER_BOOK_DEPTH', 10),
       updateInterval: EnvLoader.getNumber('UPDATE_INTERVAL', 1000),
+      shutdownBehavior: getShutdownBehavior(EnvLoader.getString('SHUTDOWN_BEHAVIOR', 'cancel')),
     },
   };
 }
@@ -268,6 +283,12 @@ export function validateConfig(config: BotConfig): { valid: boolean; errors: str
   const validLogLevels: LogLevel[] = ['error', 'warn', 'info', 'debug'];
   if (!validLogLevels.includes(config.general.logLevel)) {
     errors.push(`logLevel must be one of: ${validLogLevels.join(', ')}`);
+  }
+
+  // Validate shutdown behavior
+  const validShutdownBehaviors: ShutdownBehavior[] = ['cancel', 'wait', 'force'];
+  if (!validShutdownBehaviors.includes(config.general.shutdownBehavior)) {
+    errors.push(`shutdownBehavior must be one of: ${validShutdownBehaviors.join(', ')}`);
   }
 
   return {

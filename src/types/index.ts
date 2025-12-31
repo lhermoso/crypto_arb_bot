@@ -77,6 +77,7 @@ export interface TradeResult {
   symbol: Symbol;
   side: 'buy' | 'sell';
   amount: number;
+  filled: number;
   price: number;
   cost: number;
   fee: number;

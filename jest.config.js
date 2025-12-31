@@ -3,8 +3,13 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src'],
   testMatch: [
-    '**/__tests__/**/*.ts',
+    '**/__tests__/**/*.test.ts',
+    '**/__tests__/**/*.spec.ts',
     '**/?(*.)+(spec|test).ts'
+  ],
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    '<rootDir>/src/__tests__/setup.ts'
   ],
   transform: {
     '^.+\\.ts$': 'ts-jest',
@@ -15,7 +20,7 @@ module.exports = {
     '!src/**/*.test.ts',
     '!src/**/*.spec.ts',
   ],
-  moduleNameMapping: {
+  moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
     '^@config/(.*)$': '<rootDir>/src/config/$1',
     '^@exchanges/(.*)$': '<rootDir>/src/exchanges/$1',

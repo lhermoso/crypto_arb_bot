@@ -200,6 +200,9 @@ function loadStrategyConfigs(): StrategyConfig[] {
         checkInterval: EnvLoader.getNumber(`${upperStrategyName}_CHECK_INTERVAL`, 5000),
         maxSlippage: EnvLoader.getNumber(`${upperStrategyName}_MAX_SLIPPAGE`, 0.1),
         partialFillThreshold: EnvLoader.getNumber(`${upperStrategyName}_PARTIAL_FILL_THRESHOLD`, 95),
+        priceTolerancePercent: EnvLoader.getNumber(`${upperStrategyName}_PRICE_TOLERANCE`, 0.1),
+        maxProfitErosionPercent: EnvLoader.getNumber(`${upperStrategyName}_MAX_PROFIT_EROSION`, 20),
+        dynamicToleranceEnabled: EnvLoader.getBoolean(`${upperStrategyName}_DYNAMIC_TOLERANCE`, true),
       },
     });
   }

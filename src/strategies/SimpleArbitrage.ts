@@ -26,6 +26,19 @@ import { logger, TradeLogger, performanceLogger } from '@utils/logger';
 import { sleep, withTimeout, retry } from '@utils/helpers';
 
 /**
+ * Price validation result with variance tracking
+ */
+interface PriceValidationResult {
+  valid: boolean;
+  currentBuyPrice?: number;
+  currentSellPrice?: number;
+  buyPriceVariance?: number;  // Percentage variance from expected
+  sellPriceVariance?: number; // Percentage variance from expected
+  totalVariance?: number;     // Combined variance impact on profit
+  reason?: string;
+}
+
+/**
  * Simple Arbitrage Strategy Configuration
  */
 interface SimpleArbitrageConfig extends StrategyConfig {
@@ -37,6 +50,9 @@ interface SimpleArbitrageConfig extends StrategyConfig {
     maxOpportunityAge: number;
     priceValidationWindow: number;
     partialFillThreshold: number;
+    priceTolerancePercent: number;         // Base price tolerance (default 0.1%)
+    maxProfitErosionPercent: number;       // Max % of expected profit that can be eroded by price variance (default 20%)
+    dynamicToleranceEnabled: boolean;      // Enable dynamic tolerance based on profit margin
   };
 }
 
@@ -47,6 +63,12 @@ export class SimpleArbitrage extends BaseStrategy {
   private monitoringInterval?: NodeJS.Timeout;
   private activeTrades = new Set<string>();
   private lastMarketData = new Map<string, MarketData>();
+  private profitVarianceHistory: Array<{
+    timestamp: number;
+    expectedProfit: number;
+    priceVarianceImpact: number;
+    symbol: string;
+  }> = [];
 
   constructor(
     name: string,
@@ -54,7 +76,7 @@ export class SimpleArbitrage extends BaseStrategy {
     exchangeManager: ExchangeManager
   ) {
     super(name, config as SimpleArbitrageConfig, exchangeManager);
-    
+
     // Set default parameters if not provided
     this.config.params = {
       checkInterval: 5000, // 5 seconds
@@ -64,6 +86,9 @@ export class SimpleArbitrage extends BaseStrategy {
       maxOpportunityAge: 5000, // 5 seconds
       priceValidationWindow: 2000, // 2 seconds
       partialFillThreshold: 95, // 95% minimum fill required
+      priceTolerancePercent: 0.1, // 0.1% base price tolerance
+      maxProfitErosionPercent: 20, // Max 20% of expected profit can be eroded
+      dynamicToleranceEnabled: true, // Enable profit-aware dynamic tolerance
       ...this.config.params,
     };
 
@@ -267,9 +292,19 @@ export class SimpleArbitrage extends BaseStrategy {
   }
 
   /**
-   * Validate that current prices still support the opportunity
+   * Validate that current prices still support the opportunity with profit-aware tolerance
    */
   private async validateCurrentPrices(opportunity: ArbitrageOpportunity): Promise<boolean> {
+    const result = await this.validateCurrentPricesWithTracking(opportunity);
+    return result.valid;
+  }
+
+  /**
+   * Validate prices with detailed tracking of variance for analysis
+   */
+  private async validateCurrentPricesWithTracking(
+    opportunity: ArbitrageOpportunity
+  ): Promise<PriceValidationResult> {
     const config = this.config as SimpleArbitrageConfig;
 
     try {
@@ -284,35 +319,171 @@ export class SimpleArbitrage extends BaseStrategy {
       const bestBid = sellOrderBook.bids?.[0];
 
       if (!bestAsk || !bestBid) {
-        return false;
+        return { valid: false, reason: 'Order book data unavailable' };
       }
 
-      // Allow small price movements within validation window
-      const priceTolerancePercent = 0.1; // 0.1%
-      const askTolerance = opportunity.buyPrice * (priceTolerancePercent / 100);
-      const bidTolerance = opportunity.sellPrice * (priceTolerancePercent / 100);
+      const currentBuyPrice = bestAsk[0];
+      const currentSellPrice = bestBid[0];
 
-      if (bestAsk && bestAsk[0] && bestAsk[0] > opportunity.buyPrice + askTolerance) {
-        return false;
+      if (!currentBuyPrice || !currentSellPrice) {
+        return { valid: false, reason: 'Invalid price data' };
       }
 
-      if (bestBid && bestBid[0] && bestBid[0] < opportunity.sellPrice - bidTolerance) {
-        return false;
+      // Calculate price variances as percentages
+      const buyPriceVariance = ((currentBuyPrice - opportunity.buyPrice) / opportunity.buyPrice) * 100;
+      const sellPriceVariance = ((opportunity.sellPrice - currentSellPrice) / opportunity.sellPrice) * 100;
+
+      // Calculate total variance impact on profit
+      // Positive variance means prices moved against us (higher buy, lower sell)
+      const totalVariance = buyPriceVariance + sellPriceVariance;
+
+      // Get configurable tolerance
+      const baseTolerance = config.params.priceTolerancePercent;
+
+      // Check basic tolerance first
+      if (buyPriceVariance > baseTolerance) {
+        this.recordPriceVariance(opportunity, totalVariance);
+        return {
+          valid: false,
+          currentBuyPrice,
+          currentSellPrice,
+          buyPriceVariance,
+          sellPriceVariance,
+          totalVariance,
+          reason: `Buy price exceeded tolerance: ${buyPriceVariance.toFixed(4)}% > ${baseTolerance}%`,
+        };
       }
+
+      if (sellPriceVariance > baseTolerance) {
+        this.recordPriceVariance(opportunity, totalVariance);
+        return {
+          valid: false,
+          currentBuyPrice,
+          currentSellPrice,
+          buyPriceVariance,
+          sellPriceVariance,
+          totalVariance,
+          reason: `Sell price exceeded tolerance: ${sellPriceVariance.toFixed(4)}% > ${baseTolerance}%`,
+        };
+      }
+
+      // Dynamic profit-aware validation
+      if (config.params.dynamicToleranceEnabled && totalVariance > 0) {
+        // Calculate what percentage of expected profit would be eroded by price variance
+        const profitErosionPercent = (totalVariance / opportunity.profitPercent) * 100;
+
+        if (profitErosionPercent > config.params.maxProfitErosionPercent) {
+          this.recordPriceVariance(opportunity, totalVariance);
+          logger.debug('Price validation failed: profit erosion too high', {
+            symbol: opportunity.symbol,
+            expectedProfit: opportunity.profitPercent.toFixed(4),
+            totalVariance: totalVariance.toFixed(4),
+            profitErosionPercent: profitErosionPercent.toFixed(2),
+            maxAllowed: config.params.maxProfitErosionPercent,
+          });
+          return {
+            valid: false,
+            currentBuyPrice,
+            currentSellPrice,
+            buyPriceVariance,
+            sellPriceVariance,
+            totalVariance,
+            reason: `Profit erosion too high: ${profitErosionPercent.toFixed(2)}% > ${config.params.maxProfitErosionPercent}% max`,
+          };
+        }
+      }
+
+      // Record variance for tracking even on success
+      this.recordPriceVariance(opportunity, totalVariance);
 
       // Check slippage
       if (!isSlippageAcceptable(buyOrderBook, opportunity.amount, 'buy', config.params.maxSlippage)) {
-        return false;
+        return {
+          valid: false,
+          currentBuyPrice,
+          currentSellPrice,
+          buyPriceVariance,
+          sellPriceVariance,
+          totalVariance,
+          reason: 'Buy slippage exceeds maximum',
+        };
       }
 
-      return isSlippageAcceptable(sellOrderBook, opportunity.amount, 'sell', config.params.maxSlippage);
+      if (!isSlippageAcceptable(sellOrderBook, opportunity.amount, 'sell', config.params.maxSlippage)) {
+        return {
+          valid: false,
+          currentBuyPrice,
+          currentSellPrice,
+          buyPriceVariance,
+          sellPriceVariance,
+          totalVariance,
+          reason: 'Sell slippage exceeds maximum',
+        };
+      }
 
-
+      return {
+        valid: true,
+        currentBuyPrice,
+        currentSellPrice,
+        buyPriceVariance,
+        sellPriceVariance,
+        totalVariance,
+      };
 
     } catch (error) {
       logger.debug('Error validating current prices:', error);
-      return false;
+      return { valid: false, reason: `Validation error: ${(error as Error).message}` };
     }
+  }
+
+  /**
+   * Record price variance for analysis and monitoring
+   */
+  private recordPriceVariance(opportunity: ArbitrageOpportunity, totalVariance: number): void {
+    const maxHistorySize = 100;
+
+    this.profitVarianceHistory.push({
+      timestamp: Date.now(),
+      expectedProfit: opportunity.profitPercent,
+      priceVarianceImpact: totalVariance,
+      symbol: opportunity.symbol,
+    });
+
+    // Keep history bounded
+    if (this.profitVarianceHistory.length > maxHistorySize) {
+      this.profitVarianceHistory.shift();
+    }
+  }
+
+  /**
+   * Get profit variance statistics for monitoring
+   */
+  public getProfitVarianceStats(): {
+    avgVariance: number;
+    maxVariance: number;
+    recentCount: number;
+    avgProfitImpact: number;
+  } {
+    if (this.profitVarianceHistory.length === 0) {
+      return { avgVariance: 0, maxVariance: 0, recentCount: 0, avgProfitImpact: 0 };
+    }
+
+    const variances = this.profitVarianceHistory.map(h => h.priceVarianceImpact);
+    const avgVariance = variances.reduce((a, b) => a + b, 0) / variances.length;
+    const maxVariance = Math.max(...variances);
+
+    // Calculate average profit impact (variance as % of expected profit)
+    const profitImpacts = this.profitVarianceHistory.map(
+      h => (h.priceVarianceImpact / h.expectedProfit) * 100
+    );
+    const avgProfitImpact = profitImpacts.reduce((a, b) => a + b, 0) / profitImpacts.length;
+
+    return {
+      avgVariance,
+      maxVariance,
+      recentCount: this.profitVarianceHistory.length,
+      avgProfitImpact,
+    };
   }
 
   /**
@@ -581,11 +752,12 @@ export class SimpleArbitrage extends BaseStrategy {
    */
   override getStatus(): any {
     const baseStatus = super.getStatus();
-    
+
     return {
       ...baseStatus,
       activeTrades: this.activeTrades.size,
       marketDataAge: this.getMarketDataAge(),
+      profitVarianceStats: this.getProfitVarianceStats(),
       config: this.config,
     };
   }

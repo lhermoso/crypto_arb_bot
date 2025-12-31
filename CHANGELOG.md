@@ -10,9 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Enforce maxConcurrentTrades configuration limit to prevent unlimited concurrent trade execution
+- Fix price validation tolerance being too loose causing systematic profit erosion by making tolerance configurable and adding profit-aware validation
 - Fix race condition in concurrent order execution that could cause naked short positions by executing buy order before sell order
 - Add partial fill threshold validation (default 95%) to reject trades with insufficient fill and prevent position mismatch
 - Adjust sell order amount to match actual buy fill amount for partial fills above threshold
+
+### Added
+
+- Add configurable price tolerance settings: `SIMPLE_ARBITRAGE_PRICE_TOLERANCE`, `SIMPLE_ARBITRAGE_MAX_PROFIT_EROSION`, `SIMPLE_ARBITRAGE_DYNAMIC_TOLERANCE`
+- Add profit-aware price validation that rejects trades when price variance would consume too much expected profit
+- Add price variance tracking and statistics for monitoring actual vs expected profit variance
 
 ### Changed
 

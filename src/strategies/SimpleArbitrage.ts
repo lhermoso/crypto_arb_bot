@@ -246,6 +246,38 @@ export class SimpleArbitrage extends BaseStrategy {
   }
 
   /**
+   * Atomically try to acquire a trade lock for the given opportunity.
+   * Returns the trade key if lock was acquired, null if trade is already active.
+   * This prevents race conditions by combining check-and-add in a single synchronous block.
+   */
+  private tryAcquireTradeLock(opportunity: ArbitrageOpportunity): string | null {
+    const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}`;
+
+    // Atomic check-and-add: both operations happen synchronously
+    // No async operations can interleave between has() and add()
+    if (this.activeTrades.has(tradeKey)) {
+      logger.warn('Duplicate trade attempt blocked', {
+        tradeKey,
+        symbol: opportunity.symbol,
+        buyExchange: opportunity.buyExchange,
+        sellExchange: opportunity.sellExchange,
+        activeTrades: this.activeTrades.size,
+      });
+      return null;
+    }
+
+    this.activeTrades.add(tradeKey);
+    return tradeKey;
+  }
+
+  /**
+   * Release a trade lock when validation fails before execution starts.
+   */
+  private releaseTradeLock(tradeKey: string): void {
+    this.activeTrades.delete(tradeKey);
+  }
+
+  /**
    * Check if a trade should be executed
    */
   private async shouldExecuteTrade(opportunity: ArbitrageOpportunity): Promise<boolean> {
@@ -271,10 +303,11 @@ export class SimpleArbitrage extends BaseStrategy {
       return false;
     }
 
-    // Check if we're already trading this pair
-    const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}`;
-    if (this.activeTrades.has(tradeKey)) {
-      logger.debug('Trade already active for this opportunity', { tradeKey });
+    // Atomically acquire trade lock before any async operations
+    // This prevents race conditions where multiple async operations
+    // could pass the check before any adds to the Set
+    const tradeKey = this.tryAcquireTradeLock(opportunity);
+    if (tradeKey === null) {
       return false;
     }
 
@@ -283,10 +316,12 @@ export class SimpleArbitrage extends BaseStrategy {
       const hasRequiredBalance = await this.checkRequiredBalances(opportunity);
       if (!hasRequiredBalance) {
         logger.debug('Insufficient balance for trade', { opportunity });
+        this.releaseTradeLock(tradeKey);
         return false;
       }
     } catch (error) {
       logger.debug('Error checking balances:', error);
+      this.releaseTradeLock(tradeKey);
       return false;
     }
 
@@ -296,6 +331,7 @@ export class SimpleArbitrage extends BaseStrategy {
     }
 
     logger.debug('Price validation failed', { opportunity });
+    this.releaseTradeLock(tradeKey);
     return false;
   }
 
@@ -601,13 +637,12 @@ export class SimpleArbitrage extends BaseStrategy {
 
   /**
    * Execute an arbitrage trade
+   * Note: Trade lock is already acquired by shouldExecuteTrade() before this method is called.
+   * The lock will be released in the finally block.
    */
   private async executeTrade(opportunity: ArbitrageOpportunity): Promise<void> {
     const config = this.config as SimpleArbitrageConfig;
-    const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}-${Date.now()}`;
-
-    // Mark trade as active
-    this.activeTrades.add(tradeKey);
+    const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}`;
 
     const execution: ArbitrageExecution = {
       opportunity,

@@ -8,7 +8,7 @@
 import { EventEmitter } from 'events';
 import { CONFIG, validateConfig, isTestMode } from '@/config';
 import { ExchangeManager } from '@exchanges/ExchangeManager';
-import { StrategyFactory, IStrategy } from '@/strategies';
+import { StrategyFactory, IStrategy, StrategyStatus } from '@/strategies';
 import { logger, TradeLogger } from '@utils/logger';
 import type { BotConfig } from '@/types';
 
@@ -141,7 +141,7 @@ class CryptoArbitrageBot extends EventEmitter {
     strategies: Array<{
       name: string;
       isRunning: boolean;
-      status: any;
+      status: StrategyStatus;
     }>;
   } {
     const result: {
@@ -151,7 +151,7 @@ class CryptoArbitrageBot extends EventEmitter {
       strategies: Array<{
         name: string;
         isRunning: boolean;
-        status: any;
+        status: StrategyStatus;
       }>;
     } = {
       isRunning: this.isRunning,

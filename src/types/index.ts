@@ -112,6 +112,16 @@ export interface ExchangeBalance {
 }
 
 /**
+ * Currency balance entry from CCXT Balances object
+ * Represents the balance for a single currency (e.g., BTC, USDT)
+ */
+export interface CurrencyBalance {
+  free: number;
+  used: number;
+  total: number;
+}
+
+/**
  * Market data for a symbol on an exchange
  */
 export interface MarketData {

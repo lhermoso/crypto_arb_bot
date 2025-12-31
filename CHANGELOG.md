@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exponential backoff strategy when rate limit errors (429) are received from exchanges
 - Rate limiter stats logging (requests per window, rate limit errors, throttle status)
 - Per-exchange rate limit configuration support via environment variables
+- Add unit test coverage for core utility modules (`calculations.ts` and `helpers.ts`)
+- Add integration tests for `SimpleArbitrage` strategy with mocked exchange data
+- Create `src/__tests__/` directory structure for organized test files
+- Configure Jest coverage thresholds (90%+ for calculations.ts, 85%+ for helpers.ts)
+- Add `@types/jest` dev dependency for TypeScript test support
 
 ### Fixed
 

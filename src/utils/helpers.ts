@@ -68,7 +68,7 @@ export function formatCurrency(value: number, currency = 'USD', decimals = 2): s
 /**
  * Create a debounced function that delays execution
  */
-export function debounce<T extends (...args: any[]) => any>(
+export function debounce<T extends (...args: unknown[]) => unknown>(
   func: T,
   delay: number
 ): (...args: Parameters<T>) => void {
@@ -83,7 +83,7 @@ export function debounce<T extends (...args: any[]) => any>(
 /**
  * Create a throttled function that limits execution frequency
  */
-export function throttle<T extends (...args: any[]) => any>(
+export function throttle<T extends (...args: unknown[]) => unknown>(
   func: T,
   limit: number
 ): (...args: Parameters<T>) => void {

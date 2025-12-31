@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove unused `_isBuy` parameter from `calculateWeightedAveragePrice` function in `src/utils/calculations.ts`
 - Replace `console.warn` with Winston logger in config module for consistent logging
 - Add deferred warning queue pattern to handle circular dependency between config and logger modules
+- Improve type safety by replacing `any` types with proper type definitions
+- Add `CurrencyBalance` interface for CCXT balance currency objects
+- Add `SimpleArbitrageStatus` interface for strategy-specific status
+- Replace `any[]` with `unknown[]` in generic function signatures (`debounce`, `throttle`)
+- Use CCXT `ConstructorArgs` type for exchange initialization options
+- Remove `@ts-ignore` comments with type-safe dynamic exchange access
 
 ### Security
 - Fixed high severity vulnerability in glob 10.2.0-10.4.5 (command injection via `-c/--cmd`)

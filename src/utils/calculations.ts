@@ -5,11 +5,17 @@
 import type { OrderBook } from 'ccxt';
 import type { ArbitrageOpportunity, ExchangeId, Symbol } from '@/types';
 import { getTradingFee as getDefaultTradingFee } from '@config/exchanges';
+import { logger } from '@utils/logger';
 
 /**
  * Fee getter function type - allows injecting custom fee retrieval
  */
 export type FeeGetter = (exchangeId: ExchangeId, symbol: string, isMaker: boolean) => number;
+
+/**
+ * Clock skew threshold in milliseconds before logging a warning
+ */
+const CLOCK_SKEW_WARNING_THRESHOLD_MS = 3000; // 3 seconds
 
 /**
  * Calculate the spread between bid and ask prices
@@ -60,6 +66,51 @@ export function calculateProfitAmount(
   const totalFees = (buyCost * buyFee) + (sellRevenue * sellFee);
   
   return sellRevenue - buyCost - totalFees;
+}
+
+/**
+ * Monitor clock skew between local and exchange time
+ * Logs a warning if skew exceeds threshold
+ */
+export function monitorClockSkew(
+  exchangeTimestamp: number | undefined,
+  exchangeId: ExchangeId
+): void {
+  if (!exchangeTimestamp) {
+    return;
+  }
+
+  const localTime = Date.now();
+  const skew = Math.abs(localTime - exchangeTimestamp);
+
+  if (skew > CLOCK_SKEW_WARNING_THRESHOLD_MS) {
+    logger.warn('Clock skew detected between local and exchange time', {
+      exchange: exchangeId,
+      localTime,
+      exchangeTime: exchangeTimestamp,
+      skewMs: skew,
+      direction: localTime > exchangeTimestamp ? 'local ahead' : 'local behind',
+    });
+  }
+}
+
+/**
+ * Get the exchange timestamp from an order book, with fallback to local time
+ * Also monitors clock skew if exchange timestamp is available
+ */
+export function getExchangeTimestamp(
+  orderBook: OrderBook,
+  exchangeId: ExchangeId
+): number {
+  const exchangeTimestamp = orderBook.timestamp;
+
+  if (exchangeTimestamp) {
+    monitorClockSkew(exchangeTimestamp, exchangeId);
+    return exchangeTimestamp;
+  }
+
+  // Fallback to local time if exchange doesn't provide timestamp
+  return Date.now();
 }
 
 /**
@@ -187,6 +238,12 @@ function calculateArbitrageOpportunity(
     sellFee
   );
 
+  // Use the oldest exchange timestamp from both order books
+  // This ensures we use the most conservative (oldest) data for opportunity age
+  const buyTimestamp = getExchangeTimestamp(buyOrderBook, buyExchange);
+  const sellTimestamp = getExchangeTimestamp(sellOrderBook, sellExchange);
+  const timestamp = Math.min(buyTimestamp, sellTimestamp);
+
   return {
     symbol,
     buyExchange,
@@ -196,7 +253,7 @@ function calculateArbitrageOpportunity(
     amount: maxTradeableAmount,
     profitPercent,
     profitAmount,
-    timestamp: Date.now(),
+    timestamp,
     fees: {
       buyFee,
       sellFee,
@@ -338,14 +395,35 @@ export function calculateRequiredBalance(
 
 /**
  * Validate if an arbitrage opportunity is still valid
+ * Uses exchange-provided timestamps for accurate age calculation
+ *
+ * @param opportunity - The arbitrage opportunity to validate
+ * @param maxAge - Maximum age in milliseconds (default 5000ms)
+ * @param referenceTimestamp - Optional reference timestamp for age calculation.
+ *                             If provided, uses this instead of Date.now().
+ *                             Useful when validating against exchange time.
  */
 export function validateOpportunity(
   opportunity: ArbitrageOpportunity,
-  maxAge = 5000 // 5 seconds
+  maxAge = 5000, // 5 seconds
+  referenceTimestamp?: number
 ): boolean {
-  const age = Date.now() - opportunity.timestamp;
-  
+  // Use provided reference timestamp or fall back to local time
+  // The opportunity.timestamp is already exchange-based from order book data
+  const now = referenceTimestamp ?? Date.now();
+  const age = now - opportunity.timestamp;
+
   if (age > maxAge) {
+    return false;
+  }
+
+  // Guard against future timestamps (could indicate severe clock skew)
+  if (age < 0) {
+    logger.warn('Opportunity timestamp is in the future, possible clock skew', {
+      opportunityTimestamp: opportunity.timestamp,
+      currentTime: now,
+      symbol: opportunity.symbol,
+    });
     return false;
   }
 
@@ -358,6 +436,4 @@ export function validateOpportunity(
   }
 
   return !(opportunity.buyPrice <= 0 || opportunity.sellPrice <= 0);
-
-
 }

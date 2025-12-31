@@ -46,6 +46,24 @@ interface BalanceReservation {
 }
 
 /**
+ * Order book staleness metrics for monitoring
+ */
+export interface OrderBookMetrics {
+  totalUpdates: number;
+  staleUpdates: number;
+  lastDataAgeMs: number;
+  maxDataAgeMs: number;
+  avgDataAgeMs: number;
+}
+
+/**
+ * Default staleness threshold in milliseconds.
+ * Order book data older than this is considered stale.
+ * Can be overridden via ORDER_BOOK_STALENESS_THRESHOLD_MS env var.
+ */
+const DEFAULT_STALENESS_THRESHOLD_MS = 500;
+
+/**
  * ExchangeManager class handles multiple exchange connections and WebSocket streams
  */
 export class ExchangeManager extends EventEmitter {
@@ -71,9 +89,29 @@ export class ExchangeManager extends EventEmitter {
   private balanceReservations = new Map<string, BalanceReservation>();
   private readonly reservationTimeout = 60000; // 60 seconds - auto-release stale reservations
 
+  // Order book staleness tracking
+  private readonly stalenessThresholdMs: number;
+  private orderBookMetrics = new Map<string, OrderBookMetrics>();
+
   constructor(private configs: ExchangeConfig[]) {
     super();
     this.setMaxListeners(100); // Allow many listeners for market data
+    this.stalenessThresholdMs = this.loadStalenessThreshold();
+  }
+
+  /**
+   * Load staleness threshold from environment or use default
+   */
+  private loadStalenessThreshold(): number {
+    const envValue = process.env.ORDER_BOOK_STALENESS_THRESHOLD_MS;
+    if (envValue) {
+      const parsed = parseInt(envValue, 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        logger.info(`Using custom order book staleness threshold: ${parsed}ms`);
+        return parsed;
+      }
+    }
+    return DEFAULT_STALENESS_THRESHOLD_MS;
   }
 
   /**
@@ -273,10 +311,12 @@ export class ExchangeManager extends EventEmitter {
    * Start watching order book for a specific exchange and symbol
    */
   private async startWatchingOrderBook(
-    instance: ExchangeInstance, 
-    symbol: Symbol, 
+    instance: ExchangeInstance,
+    symbol: Symbol,
     limit: number | undefined
   ): Promise<void> {
+    const metricsKey = `${instance.id}-${symbol}`;
+
     const watchOrderBook = async (): Promise<void> => {
       try {
         if (!instance.exchange.watchOrderBook) {
@@ -284,18 +324,53 @@ export class ExchangeManager extends EventEmitter {
         }
 
         const orderBook = await instance.exchange.watchOrderBook(symbol, limit);
+        const now = Date.now();
 
-        // Preserve exchange-provided timestamp, fallback to local time only if unavailable
-        const exchangeTimestamp = orderBook.timestamp || Date.now();
+        // Validate order book has exchange timestamp
+        const exchangeTimestamp = orderBook.timestamp;
+        let dataAgeMs: number;
+        let isStale = false;
+
+        if (exchangeTimestamp && exchangeTimestamp > 0) {
+          // Use exchange timestamp for accurate staleness detection
+          dataAgeMs = now - exchangeTimestamp;
+          isStale = dataAgeMs > this.stalenessThresholdMs;
+        } else {
+          // No exchange timestamp available - cannot validate freshness
+          // Log warning but still process (fallback to local timestamp)
+          dataAgeMs = 0;
+          logger.debug(`Order book for ${symbol} on ${instance.id} has no exchange timestamp`, {
+            exchange: instance.id,
+            symbol,
+          });
+        }
+
+        // Update metrics
+        this.updateOrderBookMetrics(metricsKey, dataAgeMs, isStale);
+
+        // Skip stale data
+        if (isStale) {
+          logger.warn(`Stale order book data rejected for ${symbol} on ${instance.id}`, {
+            exchange: instance.id,
+            symbol,
+            dataAgeMs,
+            thresholdMs: this.stalenessThresholdMs,
+            exchangeTimestamp,
+          });
+
+          // Continue watching without emitting stale data
+          setImmediate(() => watchOrderBook());
+          return;
+        }
 
         const update: OrderBookUpdate = {
           exchange: instance.id,
           symbol,
           orderBook,
-          timestamp: exchangeTimestamp,
+          timestamp: exchangeTimestamp || now,
         };
 
-        instance.lastUpdate = exchangeTimestamp;
+        instance.lastUpdate = exchangeTimestamp || now;
         instance.status = 'connected';
         instance.errorCount = 0;
 
@@ -306,7 +381,7 @@ export class ExchangeManager extends EventEmitter {
 
       } catch (error) {
         this.handleExchangeError(instance, error as Error, 'watchOrderBook');
-        
+
         // Retry after delay if not too many errors
         if (instance.errorCount < this.maxReconnectAttempts) {
           setTimeout(() => watchOrderBook(), this.reconnectDelay);
@@ -316,6 +391,50 @@ export class ExchangeManager extends EventEmitter {
 
     // Start watching
     watchOrderBook();
+  }
+
+  /**
+   * Update order book metrics for monitoring
+   */
+  private updateOrderBookMetrics(key: string, dataAgeMs: number, isStale: boolean): void {
+    let metrics = this.orderBookMetrics.get(key);
+
+    if (!metrics) {
+      metrics = {
+        totalUpdates: 0,
+        staleUpdates: 0,
+        lastDataAgeMs: 0,
+        maxDataAgeMs: 0,
+        avgDataAgeMs: 0,
+      };
+      this.orderBookMetrics.set(key, metrics);
+    }
+
+    metrics.totalUpdates++;
+    if (isStale) {
+      metrics.staleUpdates++;
+    }
+    metrics.lastDataAgeMs = dataAgeMs;
+    if (dataAgeMs > metrics.maxDataAgeMs) {
+      metrics.maxDataAgeMs = dataAgeMs;
+    }
+    // Rolling average calculation
+    const prevTotal = metrics.avgDataAgeMs * (metrics.totalUpdates - 1);
+    metrics.avgDataAgeMs = (prevTotal + dataAgeMs) / metrics.totalUpdates;
+  }
+
+  /**
+   * Get order book staleness metrics for monitoring
+   */
+  getOrderBookMetrics(): Map<string, OrderBookMetrics> {
+    return new Map(this.orderBookMetrics);
+  }
+
+  /**
+   * Get metrics for a specific exchange-symbol pair
+   */
+  getOrderBookMetricsFor(exchangeId: ExchangeId, symbol: Symbol): OrderBookMetrics | undefined {
+    return this.orderBookMetrics.get(`${exchangeId}-${symbol}`);
   }
 
   /**
@@ -739,6 +858,7 @@ export class ExchangeManager extends EventEmitter {
    */
   async getMarketData(symbol: Symbol): Promise<MarketData[]> {
     const marketData: MarketData[] = [];
+    const now = Date.now();
 
     for (const [exchangeId] of this.exchanges) {
       try {
@@ -747,14 +867,26 @@ export class ExchangeManager extends EventEmitter {
           this.getTicker(exchangeId, symbol).catch(() => undefined), // Ticker is optional
         ]);
 
-        // Use exchange-provided timestamp from order book, fallback to local time
-        const exchangeTimestamp = orderBook.timestamp || Date.now();
+        // Validate order book freshness using exchange timestamp
+        const exchangeTimestamp = orderBook.timestamp;
+        if (exchangeTimestamp && exchangeTimestamp > 0) {
+          const dataAgeMs = now - exchangeTimestamp;
+          if (dataAgeMs > this.stalenessThresholdMs) {
+            logger.warn(`Stale market data rejected for ${symbol} on ${exchangeId}`, {
+              exchange: exchangeId,
+              symbol,
+              dataAgeMs,
+              thresholdMs: this.stalenessThresholdMs,
+            });
+            continue; // Skip stale data
+          }
+        }
 
         const marketDataItem: MarketData = {
           exchange: exchangeId,
           symbol,
           orderBook,
-          timestamp: exchangeTimestamp,
+          timestamp: exchangeTimestamp || now,
         };
 
         if (ticker) {

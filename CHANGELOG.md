@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recover in-progress trades from persistent storage on startup
 - Detect and alert on orphaned trades (older than 24 hours)
 - Clear logging of state recovery process during startup
+- Add order cancellation during graceful shutdown to prevent orphaned orders on exchanges
+- Add configurable shutdown behavior via `SHUTDOWN_BEHAVIOR` env var (cancel/wait/force)
+- Add `cancelOrder`, `fetchOpenOrders`, and `cancelAllOrders` methods to ExchangeManager
+- Add pending order tracking in SimpleArbitrage strategy
 
 ### Fixed
 

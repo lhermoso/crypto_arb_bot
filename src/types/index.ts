@@ -156,6 +156,7 @@ export interface BotConfig {
     maxConcurrentTrades: number;
     orderBookDepth: number;
     updateInterval: number;
+    shutdownBehavior: ShutdownBehavior;
   };
 }
 
@@ -163,6 +164,14 @@ export interface BotConfig {
  * Log levels
  */
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
+
+/**
+ * Shutdown behavior options for handling pending orders
+ * - 'cancel': Cancel all pending orders before exit (recommended)
+ * - 'wait': Wait for orders to fill or timeout, then exit without cancelling
+ * - 'force': Exit immediately without waiting or cancelling
+ */
+export type ShutdownBehavior = 'cancel' | 'wait' | 'force';
 
 /**
  * Event types for the bot

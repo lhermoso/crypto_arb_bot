@@ -5,21 +5,22 @@
  * and executes arbitrage trades when profitable opportunities are found.
  */
 
-import type { 
-  Symbol, 
-  ArbitrageOpportunity, 
+import type {
+  Symbol,
+  ArbitrageOpportunity,
   ArbitrageExecution,
   TradeOrder,
   StrategyConfig,
-  MarketData 
+  MarketData
 } from '@/types';
+import { CONFIG } from '@/config';
 import type { ExchangeManager } from '@exchanges/ExchangeManager';
 import { BaseStrategy } from './IStrategy';
-import { 
+import {
   findArbitrageOpportunities,
   validateOpportunity,
   calculateRequiredBalance,
-  isSlippageAcceptable 
+  isSlippageAcceptable
 } from '@utils/calculations';
 import { logger, TradeLogger, performanceLogger } from '@utils/logger';
 import { sleep, withTimeout, retry } from '@utils/helpers';
@@ -216,6 +217,20 @@ export class SimpleArbitrage extends BaseStrategy {
    */
   private async shouldExecuteTrade(opportunity: ArbitrageOpportunity): Promise<boolean> {
     const config = this.config as SimpleArbitrageConfig;
+
+    // Check if max concurrent trades limit is reached
+    const maxConcurrentTrades = CONFIG.general.maxConcurrentTrades;
+    if (this.activeTrades.size >= maxConcurrentTrades) {
+      logger.info('Max concurrent trades limit reached, skipping opportunity', {
+        activeTrades: this.activeTrades.size,
+        maxConcurrentTrades,
+        symbol: opportunity.symbol,
+        buyExchange: opportunity.buyExchange,
+        sellExchange: opportunity.sellExchange,
+        profitPercent: opportunity.profitPercent,
+      });
+      return false;
+    }
 
     // Check if opportunity is still valid
     if (!validateOpportunity(opportunity, config.params.maxOpportunityAge)) {

@@ -25,6 +25,7 @@ import {
 } from '@utils/calculations';
 import { logger, TradeLogger, performanceLogger } from '@utils/logger';
 import { sleep, withTimeout, generateClientOrderId } from '@utils/helpers';
+import { TradeStatePersistence, getTradeStatePersistence } from '@utils/TradeStatePersistence';
 
 /**
  * Price validation result with variance tracking
@@ -71,6 +72,7 @@ export class SimpleArbitrage extends BaseStrategy {
     symbol: string;
   }> = [];
   private feeGetter: FeeGetter;
+  private statePersistence: TradeStatePersistence;
 
   constructor(
     name: string,
@@ -99,6 +101,9 @@ export class SimpleArbitrage extends BaseStrategy {
       return this.exchangeManager.getTradingFee(exchangeId, symbol, isMaker);
     };
 
+    // Initialize state persistence
+    this.statePersistence = getTradeStatePersistence();
+
     logger.info(`SimpleArbitrage strategy initialized`, {
       symbols: this.config.symbols,
       exchanges: this.config.exchanges,
@@ -112,6 +117,10 @@ export class SimpleArbitrage extends BaseStrategy {
    */
   protected async onStart(): Promise<void> {
     logger.info(`Starting SimpleArbitrage strategy for ${this.config.symbols.join(', ')}`);
+
+    // Initialize and recover persisted state
+    await this.statePersistence.initialize();
+    await this.recoverPersistedState();
 
     // Subscribe to order book updates for all symbols
     for (const symbol of this.config.symbols) {
@@ -127,6 +136,33 @@ export class SimpleArbitrage extends BaseStrategy {
     this.startMonitoring();
 
     logger.info('SimpleArbitrage strategy started successfully');
+  }
+
+  /**
+   * Recover persisted state from previous run
+   */
+  private async recoverPersistedState(): Promise<void> {
+    logger.info('Recovering trade state from persistent storage...');
+
+    const { recoveredTrades, orphanedTrades } = await this.statePersistence.recoverState();
+
+    // Restore active trades to in-memory Set
+    for (const trade of recoveredTrades) {
+      this.activeTrades.add(trade.tradeKey);
+      logger.info('Restored active trade to memory', {
+        tradeKey: trade.tradeKey,
+        status: trade.status,
+      });
+    }
+
+    if (recoveredTrades.length === 0 && orphanedTrades.length === 0) {
+      logger.info('No trades to recover from persistent storage');
+    } else {
+      logger.info('Trade state recovery complete', {
+        restoredToMemory: recoveredTrades.length,
+        orphanedRequiringAttention: orphanedTrades.length,
+      });
+    }
   }
 
   /**
@@ -644,6 +680,9 @@ export class SimpleArbitrage extends BaseStrategy {
     const config = this.config as SimpleArbitrageConfig;
     const tradeKey = `${opportunity.symbol}-${opportunity.buyExchange}-${opportunity.sellExchange}`;
 
+    // Persist trade state BEFORE execution begins
+    await this.statePersistence.recordTradeStart(opportunity);
+
     const execution: ArbitrageExecution = {
       opportunity,
       success: false,
@@ -744,6 +783,9 @@ export class SimpleArbitrage extends BaseStrategy {
       );
 
       execution.buyTrade = buyResult;
+
+      // Persist buy result immediately
+      await this.statePersistence.recordBuyExecuted(tradeKey, buyResult);
 
       if (!buyResult.success) {
         execution.success = false;
@@ -892,6 +934,13 @@ export class SimpleArbitrage extends BaseStrategy {
       // Mark trade as completed
       this.activeTrades.delete(tradeKey);
       execution.executionTime = Date.now() - execution.executionTime;
+
+      // Persist trade completion
+      await this.statePersistence.recordTradeComplete(
+        tradeKey,
+        execution.success,
+        execution.sellTrade
+      );
 
       // Record the execution
       this.recordExecution(execution);

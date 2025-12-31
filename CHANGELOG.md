@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add file-based trade state persistence to prevent state loss on restart
+- Recover in-progress trades from persistent storage on startup
+- Detect and alert on orphaned trades (older than 24 hours)
+- Clear logging of state recovery process during startup
+
 ### Fixed
 
 - Enforce maxConcurrentTrades configuration limit to prevent unlimited concurrent trade execution

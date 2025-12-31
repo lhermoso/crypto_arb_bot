@@ -87,6 +87,7 @@ Thumbs.db
 trades.db
 market_data/
 backtest_results/
+data/
 
 # SSL certificates
 *.pem

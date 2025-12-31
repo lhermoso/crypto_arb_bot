@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Remove unused `_isBuy` parameter from `calculateWeightedAveragePrice` function in `src/utils/calculations.ts`
+
 ### Security
 - Fixed high severity vulnerability in glob 10.2.0-10.4.5 (command injection via `-c/--cmd`)
 - Fixed moderate severity vulnerability in js-yaml (prototype pollution in merge)

@@ -4,215 +4,144 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Essential Commands
 
-### Development Workflow
 ```bash
-# Start development server with hot reload
-npm run dev
+# Development
+npm run dev              # Start with ts-node
+npm run dev:watch        # Start with nodemon hot reload
+LOG_LEVEL=debug npm run dev  # Enable debug logging
 
-# Start with nodemon watching for changes
-npm run dev:watch
+# Build & Production
+npm run build            # Compile TypeScript (runs clean first)
+npm start                # Run compiled code (uses tsconfig.runtime.json for path aliases)
+npm run clean            # Remove dist/
 
-# Build the project
-npm run build
+# Code Quality
+npm run lint             # Check for issues
+npm run lint:fix         # Auto-fix issues
 
-# Run in production
-npm start
-
-# Clean build artifacts
-npm run clean
+# Testing
+npm test                 # Run all tests
+npm test -- --testPathPattern="<pattern>"  # Run specific test file
+npm test -- --watch      # Watch mode
 ```
 
-### Code Quality
-```bash
-# Lint TypeScript files
-npm run lint
+**Node.js requirement:** >=18.0.0
 
-# Fix linting issues automatically
-npm run lint:fix
-
-# Run tests
-npm test
-```
-
-### Environment Setup
-```bash
-# Copy environment template and configure
-cp .env.example .env
-# Edit .env with your API keys and settings
-```
+**ESLint note:** Uses legacy `.eslintrc.js` with ESLint 9. The `ESLINT_USE_FLAT_CONFIG=false` flag is baked into the npm scripts.
 
 ## Project Architecture
 
-### Core Architecture Pattern
-This is a **cryptocurrency arbitrage trading bot** built with TypeScript and CCXT. The architecture follows a **modular, event-driven design** with clear separation of concerns:
+**Cryptocurrency arbitrage bot** using TypeScript and CCXT with an event-driven, modular design.
 
-- **Main Orchestrator** (`src/main.ts`): Coordinates the entire application lifecycle
-- **Exchange Manager** (`src/exchanges/`): Handles CCXT integration and WebSocket connections
-- **Strategy System** (`src/strategies/`): Pluggable trading algorithms with base interface
-- **Configuration Management** (`src/config/`): Environment-based settings with validation
-- **Utilities** (`src/utils/`): Shared functions for calculations, logging, and helpers
+### Data Flow
+1. `CryptoArbitrageBot` (src/main.ts) initializes `ExchangeManager` and strategies
+2. `ExchangeManager` connects to exchanges via CCXT Pro (WebSocket) or falls back to REST
+3. Strategies subscribe to order book updates and emit opportunities
+4. Trades execute sequentially (buy first, then sell) to avoid naked short positions
+5. Trade state persists to `data/trade-state.json` for crash recovery
 
-### Key Design Patterns
-1. **Strategy Pattern**: All trading strategies implement `IStrategy` interface
-2. **Factory Pattern**: `StrategyFactory` creates strategy instances
-3. **Event-Driven**: Extensive use of EventEmitter for loose coupling
-4. **Dependency Injection**: Components receive dependencies via constructor
+### Key Components
+- **CryptoArbitrageBot** (src/main.ts): Orchestrates lifecycle, sets up event listeners, handles graceful shutdown
+- **ExchangeManager** (src/exchanges/ExchangeManager.ts): CCXT wrapper with WebSocket subscriptions, reconnection logic, fee caching (24h TTL), balance reservation system, duplicate order prevention, and exchange-specific order book limits
+- **BaseStrategy** (src/strategies/IStrategy.ts): Abstract class providing lifecycle management, opportunity recording, and status tracking
+- **StrategyFactory** (src/strategies/IStrategy.ts): Registry pattern for creating strategy instances
+- **RateLimiter** (src/exchanges/RateLimiter.ts): Token bucket per exchange with exponential backoff. Exists as a standalone module but is not wired into ExchangeManager — CCXT's built-in `enableRateLimit: true` handles REST rate limiting
+- **TradeStatePersistence** (src/utils/TradeStatePersistence.ts): File-based persistence tracking trades through `pending` → `buy_executed` → `completed`/`failed`. Recovers active trades on startup; flags orphans (>24h old)
 
-### Module Organization
+### Strategy Implementation
+Strategies extend `BaseStrategy` and implement:
+- `onStart()`: Subscribe to order books, start monitoring loop
+- `onStop()`: Clean up intervals, wait for active trades
+- `shouldProcessOpportunity()`: Validate symbol, profit threshold, trade amount
+
+Current strategy: `SimpleArbitrage` — registered under both `'simple-arbitrage'` and `'simpleArbitrage'` aliases in `src/strategies/index.ts`.
+
+### TypeScript Path Aliases
+```typescript
+import { CONFIG } from '@/config';        // src/config
+import { ExchangeManager } from '@exchanges/ExchangeManager';  // src/exchanges
+import { logger } from '@utils/logger';   // src/utils
+import type { ArbitrageOpportunity } from '@/types';  // src/types
 ```
-src/
-├── config/           # Environment configuration and validation
-├── exchanges/        # CCXT integration, WebSocket management
-├── strategies/       # Trading algorithms (Simple Arbitrage, etc.)
-├── types/           # TypeScript interfaces and type definitions
-├── utils/           # Shared utilities (calculations, logging, helpers)
-└── main.ts          # Application entry point and orchestration
-```
 
-## TypeScript Configuration
+Path aliases resolve via `tsconfig.json` (baseUrl: `./src`) for dev and `tsconfig.runtime.json` (baseUrl: `./dist`) for production. Jest mirrors these in `moduleNameMapper` in `jest.config.js`.
 
-### Path Mapping
-The project uses TypeScript path aliases for clean imports:
-- `@/*` → `src/*`
-- `@config/*` → `src/config/*`
-- `@exchanges/*` → `src/exchanges/*`
-- `@strategies/*` → `src/strategies/*`
-- `@utils/*` → `src/utils/*`
-- `@types/*` → `src/types/*`
+### TypeScript Strictness
+The compiler has `exactOptionalPropertyTypes: true` — you cannot assign `undefined` to optional properties; you must omit the key entirely. Also enforces `noImplicitOverride`, `noUnusedLocals`, `noUnusedParameters`.
 
-### Strict Configuration
-TypeScript is configured with strict settings including:
-- `strict: true`
-- `noImplicitAny: true`
-- `strictNullChecks: true`
-- `noImplicitReturns: true`
-- `noUnusedLocals: true`
+## Configuration
 
-## Key Technologies & Dependencies
+### Critical: Test Mode
+`TEST_MODE=true` is the default and **must** be explicitly disabled for live trading. When enabled, exchanges use sandbox/testnet APIs.
 
-### Runtime Dependencies
-- **ccxt**: Cryptocurrency exchange API integration (supports both regular and Pro WebSocket versions)
-- **winston**: Structured logging with multiple transports
-- **dotenv**: Environment variable management
+### Environment Variables
+See `.env.example` for full list. Key variables:
+- `ENABLED_EXCHANGES`: Comma-separated (binance, kucoin, okx, bybit, kraken)
+- `TRADING_SYMBOLS`: Trading pairs (e.g., XRP/USDT,BTC/USDT)
+- `SIMPLE_ARBITRAGE_MIN_PROFIT`: Minimum profit % to trigger trade
+- `SIMPLE_ARBITRAGE_MAX_TRADE_AMOUNT`: Position size limit
+- `LOG_LEVEL`: error, warn, info, debug
+- `ORDER_BOOK_STALENESS_THRESHOLD_MS`: Order book age threshold (default 500ms)
 
-### Development Dependencies
-- **TypeScript**: Primary language with strict configuration
-- **ESLint**: Code linting with TypeScript rules
-- **Jest**: Testing framework with TypeScript support
-- **ts-node**: Development runtime
-- **nodemon**: Hot reload for development
+### Exchange Credentials
+Pattern: `{EXCHANGE}_API_KEY`, `{EXCHANGE}_SECRET`, `{EXCHANGE}_PASSWORD` (if required, e.g., KuCoin)
 
-## Testing Strategy
-- **Jest** configuration with TypeScript support
-- Module name mapping matches TypeScript paths
-- Test files: `**/*.test.ts` and `**/*.spec.ts`
-- Setup file: `src/__tests__/setup.ts`
-- Coverage collection configured for all source files
+### Exchange Constants
+`src/config/exchanges.ts` defines per-exchange defaults: `DEFAULT_TRADING_FEES`, `DEFAULT_RATE_LIMITS`, `DEFAULT_TIMEOUTS`, `TESTNET_URLS`, `MIN_TRADE_AMOUNTS` (per symbol). These are the fallback when exchange API calls fail.
 
-## Environment Configuration
+## Testing
 
-### Safety-First Approach
-- `TEST_MODE=true` by default (CRITICAL for safety)
-- Comprehensive `.env.example` with detailed comments
-- Multiple exchange support with testnet/sandbox options
+Tests live in `src/__tests__/`. The test setup (`src/__tests__/setup.ts`) sets `NODE_ENV=test`, `TEST_MODE=true`, `LOG_LEVEL=error`, and suppresses all console output.
 
-### Key Environment Variables
-- `TEST_MODE`: Safety switch for live trading
-- `ENABLED_EXCHANGES`: Comma-separated list of exchanges
-- `TRADING_SYMBOLS`: Trading pairs to monitor
-- Exchange-specific API credentials
-- Strategy parameters (profit thresholds, trade amounts, etc.)
+Jest enforces per-file coverage thresholds:
+- `src/utils/calculations.ts`: 90% branches/lines/statements, 100% functions
+- `src/utils/helpers.ts`: 85% branches, 90% lines/statements, 100% functions
 
-## Logging System
+## Logging
 
-### Multi-Level Logging
-- **winston** with structured JSON logging
-- Console output with colors for development
-- File logging for production
-- Separate log categories: app.log, error.log, exceptions.log
+Winston-based with outputs:
+- Console: Colored, human-readable
+- `logs/app.log`: All logs (JSON)
+- `logs/error.log`: Errors only
+- `logs/exceptions.log`: Uncaught exceptions
+- `logs/rejections.log`: Unhandled promise rejections
 
-### Specialized Loggers
-- `TradeLogger`: Trade execution and opportunities
-- `performanceLogger`: Timing and performance metrics
-- Standard logger for general application events
+Specialized loggers:
+- `logger`: General application logging
+- `TradeLogger`: Trade execution events (static methods)
+- `performanceLogger`: Operation timing with `performanceLogger.time(name, asyncFn)`
+- `createChildLogger(name)`: Scoped child loggers
 
-## Critical Development Guidelines
+## Adding New Strategies
 
-### Safety Requirements
-1. **ALWAYS start with `TEST_MODE=true`**
-2. **Use testnet/sandbox APIs initially**
-3. **Never commit API keys or .env files**
-4. **Start with small trade amounts**
+1. Create class extending `BaseStrategy` in `src/strategies/`
+2. Implement `onStart()` and `onStop()` methods
+3. Register with `StrategyFactory.register('name', StrategyClass)` in `src/strategies/index.ts`
+4. Add environment config in `src/config/index.ts`
 
-### Code Patterns
-1. **Error Handling**: Extensive try/catch with proper logging
-2. **Async/Await**: Consistent async patterns throughout
-3. **Type Safety**: Strong typing with interfaces for all data structures
-4. **Event Emission**: Components emit events for monitoring and debugging
+## Adding New Exchanges
 
-### Testing Requirements
-- When adding new exchanges: Test in sandbox mode first
-- When modifying strategies: Validate with paper trading
-- When changing risk parameters: Review impact on position sizing
-- Always run `npm run lint` before committing
+1. Verify CCXT support and check if Pro (WebSocket) version exists
+2. Add exchange ID to `ExchangeId` type in `src/types/index.ts`
+3. Update `getExchangeCompatibleLimit()` in ExchangeManager if exchange has non-standard order book limits. Existing limits: KuCoin `[5,20,50,100]`, Bybit `[1,50,200,1000]`, Binance `[5,10,20,50,100,500,1000,5000]`, OKX `[1,5,40,100,400]`, Kraken `[10,25,100,500,1000]`
+4. Add default fees, rate limits, and testnet URLs to `src/config/exchanges.ts`
+5. Add credentials pattern to `.env.example`
 
-## Exchange Integration
+## Important Patterns
 
-### CCXT Integration Pattern
-- Attempts CCXT Pro (WebSocket) first, falls back to regular CCXT
-- Capability detection for each exchange
-- Automatic reconnection handling
-- Rate limiting and error management
+### Concurrency Safety
+- **Trade locking**: `tryAcquireTradeLock()` uses synchronous `Set.has()` + `Set.add()` (Node.js single-threaded guarantee) to prevent concurrent trades on the same symbol/exchange pair
+- **Balance reservation**: `ExchangeManager.reserveBalance()` / `releaseReservation()` with 60s auto-cleanup prevents double-spending across concurrent trades
+- **Duplicate order prevention**: `clientOrderId` + `recentOrders` Map (60s TTL) detects retried orders that already submitted
 
-### Supported Exchanges
-- Binance (with testnet support)
-- KuCoin (with sandbox support)
-- OKX, Bybit, Kraken (configurable)
+### Error Handling
+All async operations use try/catch with `logger.error()`. Strategies track last 10 errors in status.
 
-## Strategy Development
+### Event Emission
+Components emit typed events (`opportunity_found`, `execution_completed`, `exchangeError`) for loose coupling. Use `this.emit()` for strategy events.
 
-### Base Strategy Pattern
-All strategies extend `BaseStrategy` which provides:
-- Common lifecycle management
-- Event emission
-- Error tracking
-- Status reporting
-- Configuration updates
+### Graceful Shutdown
+SIGINT/SIGTERM handlers stop strategies, wait for active trades (configurable: `cancel`/`wait`/`force`), then close exchange connections.
 
-### Simple Arbitrage Implementation
-Current implementation monitors cross-exchange price differences:
-- Real-time order book monitoring
-- Profit calculation after fees
-- Balance validation before execution
-- Slippage protection
-- Concurrent trade execution
-
-## Performance Considerations
-
-### Latency Optimization
-- WebSocket connections via CCXT Pro
-- Concurrent API calls with Promise.all()
-- Efficient order book management
-- Performance timing instrumentation
-
-### Memory Management
-- Proper cleanup in shutdown handlers
-- EventEmitter listener limits
-- Market data caching with age limits
-
-## Security & Risk Management
-
-### API Security
-- Environment-based credential management
-- Sandbox mode support
-- Rate limiting configuration
-- Permission validation
-
-### Trading Risk Controls
-- Position size limits
-- Balance reserves
-- Slippage protection
-- Circuit breakers for errors
-- Opportunity age validation
-
-This architecture prioritizes safety, modularity, and extensibility while maintaining high performance for real-time arbitrage trading.
+### Config Circular Dependency
+`src/config/index.ts` uses a `deferredWarnings` queue to avoid the circular `config → logger → config` dependency. Warnings are flushed asynchronously after the logger module loads.
